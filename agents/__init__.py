@@ -1,4 +1,4 @@
+from .ac_agent import ACAgent
 from .dqn_agent import DQNAgent
-from .ac_agent import ActorCriticAgent
 
-__all__ = ["DQNAgent", "ActorCriticAgent"]
+__all__ = ["DQNAgent", "ACAgent"]
