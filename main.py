@@ -13,12 +13,12 @@ def calculate_sharpe_ratio(returns, risk_free_rate=0.0):
         return 0.0
     return np.sqrt(252) * (np.mean(returns) - risk_free_rate) / np.std(returns)
 
-def train_dqn(env, episodes=50):
-    print("\n🚀 Bắt đầu Train DQN...")
-    state_dim = env.observation_space.shape[-1]
-    agent = DQNAgent(state_dim=state_dim, action_dim=env.action_space.n)
+def train_dqn(env, episodes=100):
+    print("\n🚀 Bắt đầu Train DQN (Dueling + Soft Update)...")
+    # 🚀 Ép phẳng (Flatten) State cho MLP của FinRL
+    flat_state_dim = env.observation_space.shape[0] * env.observation_space.shape[1]
+    agent = DQNAgent(state_dim=flat_state_dim, action_dim=env.action_space.n)
     
-    # Tracking Metrics cho Deep Learning
     history = {'rewards': [], 'loss': [], 'epsilon': []}
     
     for ep in range(episodes):
@@ -28,20 +28,23 @@ def train_dqn(env, episodes=50):
         done = False
         
         while not done:
-            action = agent.act(state)
+            # 🔧 FIXED: Flatten state trước khi gửi vào agent
+            state_flat = state.reshape(-1)
+            action = agent.act(state_flat)
             next_state, reward, done, info = env.step(action)
             
-            agent.store_transition(state, action, reward, next_state, done)
-            loss = agent.train_step()
+            # 🔧 FIXED: Store flattened state
+            next_state_flat = next_state.reshape(-1)
+            agent.store_transition(state_flat, action, reward, next_state_flat, done)
+            loss = agent.train_step() # 🚀 Soft update đã nằm trong này
             if loss > 0: ep_losses.append(loss)
             
             state = next_state
             total_reward += reward
             
-        agent.update_target_network()
+        # 🚀 Đã xóa Hard Update (agent.update_target_network) ở đây
         agent.decay_epsilon()
         
-        # Lưu metrics
         avg_loss = np.mean(ep_losses) if len(ep_losses) > 0 else 0
         history['rewards'].append(total_reward)
         history['loss'].append(avg_loss)
@@ -52,10 +55,10 @@ def train_dqn(env, episodes=50):
         
     return agent, history
 
-def train_ac(env, episodes=50):
-    print("\n🚀 Bắt đầu Train Actor-Critic...")
-    state_dim = env.observation_space.shape[-1]
-    agent = ACAgent(state_dim=state_dim)
+def train_ac(env, episodes=100):
+    print("\n🚀 Bắt đầu Train Actor-Critic (Entropy Bonus)...")
+    flat_state_dim = env.observation_space.shape[0] * env.observation_space.shape[1]
+    agent = ACAgent(state_dim=flat_state_dim)
     history = {'rewards': [], 'loss': []}
     
     for ep in range(episodes):
@@ -65,10 +68,14 @@ def train_ac(env, episodes=50):
         done = False
         
         while not done:
-            action, log_prob = agent.act(state)
+            # 🔧 FIXED: Flatten state trước khi gửi vào agent
+            state_flat = state.reshape(-1)
+            action, log_prob, dist = agent.act(state_flat)
             next_state, reward, done, info = env.step(action)
             
-            loss = agent.train_step(state, log_prob, reward, next_state, done)
+            # 🔧 FIXED: Truyền state_flat đã flatten vào train_step
+            next_state_flat = next_state.reshape(-1)
+            loss = agent.train_step(state_flat, log_prob, dist, reward, next_state_flat, done)
             ep_losses.append(loss)
             
             state = next_state
@@ -84,7 +91,6 @@ def train_ac(env, episodes=50):
     return agent, history
 
 def evaluate_and_log_trades(env, agent, test_df, model_name, is_dqn=True):
-    """Hàm chạy test và ghi lại từng bước mua bán"""
     state = env.reset()
     done = False
     net_worths = [env.initial_balance]
@@ -92,24 +98,26 @@ def evaluate_and_log_trades(env, agent, test_df, model_name, is_dqn=True):
     trade_log = []
     step = 0
     
-    if is_dqn: agent.epsilon = 0.0 # Tắt random khi test
+    if is_dqn: agent.epsilon = 0.0 # Tắt ngẫu nhiên khi đi thi
         
     while not done:
-        # Lấy giá đóng cửa ngày hôm đó để ghi log
         date = test_df.index[env.current_step] if type(test_df.index) == pd.DatetimeIndex else env.current_step
         price = test_df['Close'].iloc[env.current_step]
         
         if is_dqn:
-            action = agent.act(state)
+            # 🔧 FIXED: Flatten state trước khi gửi vào DQN agent
+            state_flat = state.reshape(-1)
+            action = agent.act(state_flat) # DQN chỉ trả về 1 biến
             act_str = "HOLD" if action == 0 else ("BUY MAX" if action == 1 else "SELL ALL")
         else:
-            action, _ = agent.act(state)
+            # 🔧 FIXED: Flatten state trước khi gửi vào AC agent
+            state_flat = state.reshape(-1)
+            action, _, _ = agent.act(state_flat) # AC trả về 3 biến
             act_val = action[0]
             act_str = f"BUY {act_val:.2%}" if act_val > 0 else (f"SELL {abs(act_val):.2%}" if act_val < 0 else "HOLD")
             
         next_state, reward, done, info = env.step(action)
         
-        # Ghi nhật ký
         trade_log.append({
             "Step": step,
             "Date": date,
@@ -126,24 +134,19 @@ def evaluate_and_log_trades(env, agent, test_df, model_name, is_dqn=True):
         
     sharpe = calculate_sharpe_ratio(returns)
     trade_df = pd.DataFrame(trade_log)
-    
-    # Xuất file CSV
     trade_df.to_csv(f'results/{model_name}_trade_log.csv', index=False)
     
     return net_worths, sharpe, trade_df
 
 def plot_deep_learning_metrics(dqn_hist, ac_hist):
-    """Vẽ biểu đồ Loss và Reward hội tụ của Deep Learning"""
     fig, axs = plt.subplots(2, 2, figsize=(15, 10))
     fig.suptitle("Deep Learning Training Metrics", fontsize=16)
     
-    # DQN Rewards & Loss
     axs[0, 0].plot(dqn_hist['rewards'], color='blue')
     axs[0, 0].set_title('DQN Episode Rewards')
     axs[0, 1].plot(dqn_hist['loss'], color='red')
     axs[0, 1].set_title('DQN Training Loss (MSE)')
     
-    # AC Rewards & Loss
     axs[1, 0].plot(ac_hist['rewards'], color='orange')
     axs[1, 0].set_title('Actor-Critic Episode Rewards')
     axs[1, 1].plot(ac_hist['loss'], color='purple')
@@ -155,7 +158,7 @@ def plot_deep_learning_metrics(dqn_hist, ac_hist):
         
     plt.tight_layout()
     plt.savefig('results/dl_metrics.png')
-    
+    plt.close() # Giải phóng bộ nhớ
 
 if __name__ == "__main__":
     os.makedirs('results', exist_ok=True)
@@ -165,17 +168,17 @@ if __name__ == "__main__":
     train_df = df.iloc[:split_idx]
     test_df = df.iloc[split_idx:]
     
-    env_train_dqn = TradingEnv(train_df, window_size=60,is_discrete=True)
-    env_test_dqn = TradingEnv(test_df, window_size=60,is_discrete=True)
+    # 🚀 Window_size = 60 để AI nhìn được xu hướng dài hạn
+    env_train_dqn = TradingEnv(train_df, window_size=60, is_discrete=True)
+    env_test_dqn = TradingEnv(test_df, window_size=60, is_discrete=True)
     
     env_train_ac = TradingEnv(train_df, window_size=60, is_discrete=False)
     env_test_ac = TradingEnv(test_df, window_size=60, is_discrete=False)
     
-    # Đã tăng số episode lên 50 để mô hình có đủ thời gian "thoát" khỏi mode collapse
+    # 🚀 Train 100 Episodes
     trained_dqn, dqn_history = train_dqn(env_train_dqn, episodes=100)
     trained_ac, ac_history = train_ac(env_train_ac, episodes=100)
     
-    # Vẽ và lưu biểu đồ Loss/Reward của Deep Learning
     plot_deep_learning_metrics(dqn_history, ac_history)
     
     print("\n📊 Đang Test và Xuất File Nhật ký giao dịch...")
@@ -186,23 +189,40 @@ if __name__ == "__main__":
     print(f"✅ Đã lưu file Trade Log: results/AC_trade_log.csv")
     print(f"✅ Đã lưu biểu đồ DL Metrics: results/dl_metrics.png")
     
-    # Baseline
+    # Ghi Báo Cáo
+    with open('results/dqn_report.txt', 'w', encoding='utf-8') as f:
+        f.write("BÁO CÁO KẾT QUẢ: DEEP Q-NETWORK (DQN)\n")
+        f.write("-" * 40 + "\n")
+        f.write(f"Số vốn ban đầu: ${env_test_dqn.initial_balance:.2f}\n")
+        f.write(f"Giá trị danh mục (Final Net Worth): ${dqn_net_worths[-1]:.2f}\n")
+        f.write(f"Tỷ suất lợi nhuận trên rủi ro (Sharpe Ratio): {dqn_sharpe:.4f}\n")
+
+    with open('results/ac_report.txt', 'w', encoding='utf-8') as f:
+        f.write("BÁO CÁO KẾT QUẢ: ACTOR-CRITIC\n")
+        f.write("-" * 40 + "\n")
+        f.write(f"Số vốn ban đầu: ${env_test_ac.initial_balance:.2f}\n")
+        f.write(f"Giá trị danh mục (Final Net Worth): ${ac_net_worths[-1]:.2f}\n")
+        f.write(f"Tỷ suất lợi nhuận trên rủi ro (Sharpe Ratio): {ac_sharpe:.4f}\n")
+
+    # Baseline (Buy & Hold)
     initial_price = test_df['Close'].iloc[0]
     buy_hold_net_worths = [env_test_dqn.initial_balance]
     shares = env_test_dqn.initial_balance / initial_price
     for price in test_df['Close'].iloc[1:]:
         buy_hold_net_worths.append(shares * price)
         
-    # Plot cuối cùng
+    # Plot kết quả
     plt.figure(figsize=(14, 7))
     plt.plot(dqn_net_worths, label=f'DQN Agent (Sharpe: {dqn_sharpe:.2f})', color='blue')
     plt.plot(ac_net_worths, label=f'Actor-Critic Agent (Sharpe: {ac_sharpe:.2f})', color='orange')
     plt.plot(buy_hold_net_worths, label='Buy & Hold', color='gray', linestyle='--')
     
-    plt.title('Backtesting Performance', fontsize=14)
-    plt.xlabel('Steps')
+    plt.title('Backtesting Performance (FinRL Architecture)', fontsize=14)
+    plt.xlabel('Trading Days')
     plt.ylabel('Portfolio Value ($)')
     plt.legend()
     plt.grid(True)
     plt.savefig('results/equity_curve_comparison.png')
-    # plt.show()
+    plt.close() # Chỉ lưu, không hiển thị
+    
+    print("🚀 HOÀN TẤT TOÀN BỘ PIPELINE! Hãy mở thư mục results/ để xem kết quả.")

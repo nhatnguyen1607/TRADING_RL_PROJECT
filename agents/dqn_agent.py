@@ -42,10 +42,10 @@ class DQNAgent:
         self.memory.append((state, action, reward, next_state, done))
 
     def train_step(self):
-        if len(self.memory) < self.batch_size:
-            return 0.0 # Chưa đủ data để train
+        # [Giữ nguyên logic tạo batch, state, action, v.v...]
+        if len(self.memory) < self.batch_size: return 0.0
         
-        # Lấy mẫu ngẫu nhiên từ Replay Buffer phá vỡ temporal correlation
+        import random, numpy as np
         batch = random.sample(self.memory, self.batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
         
@@ -55,24 +55,24 @@ class DQNAgent:
         next_states = torch.FloatTensor(np.array(next_states))
         dones = torch.FloatTensor(dones).unsqueeze(1)
         
-        # Tính Q(s, a)
         q_values = self.policy_net(states).gather(1, actions)
-        
-        # Tính Target: r + gamma * max Q(s', a')
         with torch.no_grad():
             next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
             target_q = rewards + (1 - dones) * self.gamma * next_q_values
             
-        # Backpropagation
         loss = self.loss_fn(q_values, target_q)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
         
+        # 🚀 GỌI SOFT UPDATE NGAY TẠI ĐÂY MỖI BƯỚC
+        self.update_target_network()
         return loss.item()
 
-    def update_target_network(self):
-        self.target_net.load_state_dict(self.policy_net.state_dict())
+    def update_target_network(self, tau=0.005):
+        """ Soft Update theo chuẩn Polyak Averaging của FinRL """
+        for target_param, local_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
+            target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
 
     def decay_epsilon(self):
         self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)

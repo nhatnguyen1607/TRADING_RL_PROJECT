@@ -3,42 +3,38 @@ import torch.nn as nn
 from torch.distributions import Normal
 
 class ActorCritic(nn.Module):
-    """
-    Actor-Critic architecture dùng LSTM.
-    Dựa trên lý thuyết Policy Gradient.
-    """
-    def __init__(self, input_dim, action_dim=1, hidden_dim=64, num_layers=1):
+    """ Actor-Critic sử dụng MLP """
+    def __init__(self, input_dim, action_dim=1):
         super(ActorCritic, self).__init__()
         
-        # Shared Feature Extractor (LSTM)
-        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
-        
-        # Actor Head (Outputs mean and std for continuous action)
-        self.actor_mean = nn.Sequential(
-            nn.Linear(hidden_dim, 32),
+        self.shared_layers = nn.Sequential(
+            nn.Linear(input_dim, 256),
             nn.ReLU(),
-            nn.Linear(32, action_dim),
-            nn.Tanh() # Đưa mean về khoảng [-1, 1]
+            nn.Linear(256, 128),
+            nn.ReLU()
         )
-        # Log_std là tham số học được (độc lập với state hoặc phụ thuộc state)
-        self.actor_log_std = nn.Parameter(torch.zeros(1, action_dim))
         
-        # Critic Head (Outputs state-value V(s))
-        self.critic = nn.Sequential(
-            nn.Linear(hidden_dim, 32),
+        self.actor_mean = nn.Sequential(
+            nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(32, 1)
+            nn.Linear(64, action_dim),
+            nn.Tanh()
+        )
+        # 🔧 FIXED: Cải thiện khởi tạo log_std (-0.5 → tốt hơn)
+        self.actor_log_std = nn.Parameter(torch.ones(1, action_dim) * -0.5)
+        
+        self.critic = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
         )
 
     def forward(self, x):
-        lstm_out, _ = self.lstm(x)
-        last_out = lstm_out[:, -1, :]
+        x = x.view(x.size(0), -1) # Flatten
+        shared = self.shared_layers(x)
         
-        # Critic
-        value = self.critic(last_out)
-        
-        # Actor
-        action_mean = self.actor_mean(last_out)
+        value = self.critic(shared)
+        action_mean = self.actor_mean(shared)
         action_log_std = self.actor_log_std.expand_as(action_mean)
         action_std = torch.exp(action_log_std)
         
@@ -48,8 +44,7 @@ class ActorCritic(nn.Module):
         mean, std, _ = self.forward(x)
         dist = Normal(mean, std)
         action = dist.sample()
-        # Tính log probability của action để update policy
         log_prob = dist.log_prob(action).sum(dim=-1)
-        # Kẹp action vào khoảng [-1, 1]
         action = torch.clamp(action, -1.0, 1.0)
-        return action, log_prob
+        # Trả về thêm dist để tính Entropy
+        return action, log_prob, dist
