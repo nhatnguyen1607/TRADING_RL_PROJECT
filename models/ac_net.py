@@ -3,7 +3,6 @@ import torch.nn as nn
 from torch.distributions import Normal
 
 class ActorCritic(nn.Module):
-    """ Actor-Critic sử dụng MLP """
     def __init__(self, input_dim, action_dim=1):
         super(ActorCritic, self).__init__()
         
@@ -18,9 +17,9 @@ class ActorCritic(nn.Module):
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, action_dim),
-            nn.Tanh()
+            nn.Tanh() # Đảm bảo output Mean nằm trong [-1, 1]
         )
-        # 🔧 FIXED: Cải thiện khởi tạo log_std (-0.5 → tốt hơn)
+        # 🔧 FIX: Khởi tạo log_std âm để mô hình không đánh ALL IN / ALL OUT mù quáng
         self.actor_log_std = nn.Parameter(torch.ones(1, action_dim) * -0.5)
         
         self.critic = nn.Sequential(
@@ -30,7 +29,7 @@ class ActorCritic(nn.Module):
         )
 
     def forward(self, x):
-        x = x.view(x.size(0), -1) # Flatten
+        x = x.view(x.size(0), -1)
         shared = self.shared_layers(x)
         
         value = self.critic(shared)
@@ -44,7 +43,8 @@ class ActorCritic(nn.Module):
         mean, std, _ = self.forward(x)
         dist = Normal(mean, std)
         action = dist.sample()
+        # 🔧 FIXED: Lấy log_prob của raw action TRƯỚC KHI clamp để không làm vỡ Gradients
         log_prob = dist.log_prob(action).sum(dim=-1)
-        action = torch.clamp(action, -1.0, 1.0)
-        # Trả về thêm dist để tính Entropy
+        action = torch.clamp(action, -1.0, 1.0) 
+        
         return action, log_prob, dist
