@@ -23,6 +23,7 @@ wheels/
 # Data & Models (Quan trọng cho dự án RL)
 data/*.csv
 data/*.xlsx
+data/yf_cache/
 models/*.pth
 models/*.pt
 results/
