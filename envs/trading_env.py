@@ -18,6 +18,7 @@ class TradingEnv(gym.Env):
         cash_logit_bias=0.75,
         ac_temperature=1.35,
         ac_mix_power=1.0,
+        concentration_penalty_coef=0.0,
     ):
         super(TradingEnv, self).__init__()
 
@@ -229,6 +230,7 @@ class MultiAssetTradingEnv(gym.Env):
         cash_logit_bias=0.75,
         ac_temperature=1.35,
         ac_mix_power=1.0,
+        concentration_penalty_coef=0.0,
     ):
         super(MultiAssetTradingEnv, self).__init__()
 
@@ -245,6 +247,7 @@ class MultiAssetTradingEnv(gym.Env):
         self.cash_logit_bias = cash_logit_bias
         self.ac_temperature = ac_temperature
         self.ac_mix_power = ac_mix_power
+        self.concentration_penalty_coef = concentration_penalty_coef
 
         if not self.feature_cols or not self.asset_cols:
             raise ValueError("MultiAssetTradingEnv requires feature_cols and asset_cols attrs.")
@@ -355,7 +358,15 @@ class MultiAssetTradingEnv(gym.Env):
         downside_penalty = 0.10 * abs(min(portfolio_return, 0.0))
         turnover_penalty = 0.0050 * turnover
         drawdown_penalty = 0.0030 * drawdown
-        reward = (log_return - downside_penalty - turnover_penalty - drawdown_penalty) * 100.0
+        max_asset_weight = float(np.max(self.weights)) if len(self.weights) else 0.0
+        concentration_penalty = self.concentration_penalty_coef * max(max_asset_weight - 0.45, 0.0)
+        reward = (
+            log_return
+            - downside_penalty
+            - turnover_penalty
+            - drawdown_penalty
+            - concentration_penalty
+        ) * 100.0
         reward = float(np.clip(reward, -5.0, 5.0))
 
         self.current_step += 1
@@ -371,5 +382,6 @@ class MultiAssetTradingEnv(gym.Env):
             "cash_weight": self.cash_weight,
             "turnover": turnover,
             "trade_count": self.trade_count,
+            "max_asset_weight": max_asset_weight,
         }
         return self._get_obs(), reward, self.done, info

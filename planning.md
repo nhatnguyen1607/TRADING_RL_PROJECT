@@ -7,11 +7,11 @@
 - DQN Sortino ratio: 0.7717
 - DQN max drawdown: -5.50%
 - DQN meaningful trades: 276
-- AC final net worth: $10,188.36
-- AC Sharpe ratio: 0.1767
-- AC Sortino ratio: 0.2531
-- AC max drawdown: -10.27%
-- AC meaningful trades: 146
+- AC final net worth: $10,780.55
+- AC Sharpe ratio: 0.5523
+- AC Sortino ratio: 0.8930
+- AC max drawdown: -9.48%
+- AC meaningful trades: 179
 - Buy & Hold final net worth: $8,714.76
 
 Status:
@@ -19,7 +19,8 @@ Status:
 - Both agents now beat initial capital and Buy & Hold.
 - Both agents now have positive test-set Sharpe.
 - Both agents satisfy the non-lazy trading threshold.
-- DQN remains the strongest overall baseline.
+- DQN remains the strongest drawdown-stable baseline.
+- Actor-Critic is now the strongest Sharpe/Sortino baseline.
 
 ## Baseline From Existing Results
 

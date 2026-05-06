@@ -665,6 +665,7 @@ if __name__ == "__main__":
         cash_logit_bias=0.90,
         ac_temperature=1.20,
         ac_mix_power=1.0,
+        concentration_penalty_coef=0.0025,
     )
     val_len = len(val_df)
     val_starts = [0, max(0, val_len // 3), max(0, (2 * val_len) // 3)]
@@ -683,6 +684,7 @@ if __name__ == "__main__":
             cash_logit_bias=0.90,
             ac_temperature=1.20,
             ac_mix_power=1.0,
+            concentration_penalty_coef=0.0025,
         )
         for val_slice in ac_val_slices
     ]
@@ -695,6 +697,7 @@ if __name__ == "__main__":
         cash_logit_bias=0.90,
         ac_temperature=1.20,
         ac_mix_power=1.0,
+        concentration_penalty_coef=0.0025,
     )
 
     trained_dqn, dqn_history = train_dqn(
