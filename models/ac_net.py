@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
+from torch.distributions import Categorical, Normal
 
 
 class ActorCritic(nn.Module):
@@ -11,6 +11,8 @@ class ActorCritic(nn.Module):
 
         self.sequence_shape = input_dim if isinstance(input_dim, tuple) else None
         feature_dim = input_dim[-1] if isinstance(input_dim, tuple) else input_dim
+        self.action_dim = action_dim
+        self.is_discrete = action_dim > 1
 
         self.input_norm = nn.LayerNorm(feature_dim)
         self.encoder = nn.GRU(
@@ -29,9 +31,9 @@ class ActorCritic(nn.Module):
             nn.Linear(64, 64),
             nn.ReLU(),
             nn.Linear(64, action_dim),
-            nn.Tanh(),
         )
-        self.actor_log_std = nn.Parameter(torch.ones(1, action_dim) * -1.0)
+        if not self.is_discrete:
+            self.actor_log_std = nn.Parameter(torch.ones(1, action_dim) * -1.8)
 
         self.critic = nn.Sequential(
             nn.Linear(64, 64),
@@ -51,22 +53,36 @@ class ActorCritic(nn.Module):
         shared = self.shared_layers(hidden[-1])
 
         value = self.critic(shared)
-        action_mean = self.actor_mean(shared)
-        action_log_std = self.actor_log_std.expand_as(action_mean)
-        action_std = torch.exp(action_log_std).clamp(min=0.05, max=0.75)
-        return action_mean, action_std, value
+        actor_output = self.actor_mean(shared)
+        if self.is_discrete:
+            return actor_output, None, value
+        action_log_std = self.actor_log_std.expand_as(actor_output)
+        action_std = torch.exp(action_log_std).clamp(min=0.03, max=0.30)
+        return actor_output, action_std, value
 
     def get_action(self, x, deterministic=False):
-        mean, std, _ = self.forward(x)
-        dist = Normal(mean, std)
-        raw_action = mean if deterministic else dist.rsample()
+        actor_output, std, _ = self.forward(x)
+        if self.is_discrete:
+            dist = Categorical(logits=actor_output)
+            action = torch.argmax(actor_output, dim=-1) if deterministic else dist.sample()
+            log_prob = dist.log_prob(action)
+            return action, log_prob, dist
+        dist = Normal(actor_output, std)
+        raw_action = actor_output if deterministic else dist.rsample()
         log_prob = dist.log_prob(raw_action).sum(dim=-1)
         action = torch.clamp(raw_action, -1.0, 1.0)
         return action, log_prob, dist
 
     def evaluate_actions(self, x, actions):
-        mean, std, value = self.forward(x)
-        dist = Normal(mean, std)
+        actor_output, std, value = self.forward(x)
+        if self.is_discrete:
+            dist = Categorical(logits=actor_output)
+            if actions.dim() > 1:
+                actions = actions.squeeze(-1)
+            log_probs = dist.log_prob(actions.long())
+            entropy = dist.entropy()
+            return log_probs, entropy, value.squeeze(-1)
+        dist = Normal(actor_output, std)
         log_probs = dist.log_prob(actions).sum(dim=-1)
         entropy = dist.entropy().sum(dim=-1)
         return log_probs, entropy, value.squeeze(-1)

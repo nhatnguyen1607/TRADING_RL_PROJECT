@@ -1,5 +1,26 @@
 # RL Trading Improvement Plan
 
+## Current Winning Baseline
+
+- DQN final net worth: $10,526.35
+- DQN Sharpe ratio: 0.4856
+- DQN Sortino ratio: 0.7717
+- DQN max drawdown: -5.50%
+- DQN meaningful trades: 276
+- AC final net worth: $10,188.36
+- AC Sharpe ratio: 0.1767
+- AC Sortino ratio: 0.2531
+- AC max drawdown: -10.27%
+- AC meaningful trades: 146
+- Buy & Hold final net worth: $8,714.76
+
+Status:
+
+- Both agents now beat initial capital and Buy & Hold.
+- Both agents now have positive test-set Sharpe.
+- Both agents satisfy the non-lazy trading threshold.
+- DQN remains the strongest overall baseline.
+
 ## Baseline From Existing Results
 
 - DQN final net worth: $7,316.14
