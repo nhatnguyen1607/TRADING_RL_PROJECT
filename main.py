@@ -47,6 +47,16 @@ def split_with_attrs(df, split_idx):
     return left, right
 
 
+def slice_with_attrs(df, start_idx, end_idx):
+    sliced = df.iloc[start_idx:end_idx].copy()
+    sliced.attrs["feature_cols"] = df.attrs["feature_cols"]
+    if "asset_cols" in df.attrs:
+        sliced.attrs["asset_cols"] = df.attrs["asset_cols"]
+    if "tickers" in df.attrs:
+        sliced.attrs["tickers"] = df.attrs["tickers"]
+    return sliced
+
+
 def train_test_scale(df, split_idx):
     feature_cols = df.attrs["feature_cols"]
     train_df = df.iloc[:split_idx].copy()
@@ -74,9 +84,26 @@ def calculate_sortino_ratio(returns, risk_free_rate=0.0):
     return np.sqrt(252) * (np.mean(returns) - risk_free_rate) / np.std(downside)
 
 
-def validation_score(final_net_worth, sharpe, sortino, max_drawdown, avg_turnover, initial_balance=10000.0):
+def validation_score(
+    final_net_worth,
+    sharpe,
+    sortino,
+    max_drawdown,
+    avg_turnover,
+    initial_balance=10000.0,
+    trade_count=None,
+    action_changes=None,
+    unique_actions=None,
+):
     total_return = final_net_worth / initial_balance - 1.0
-    return 1.2 * sharpe + 0.4 * sortino + 1.5 * total_return - 1.5 * abs(max_drawdown) - 0.75 * avg_turnover
+    score = 1.2 * sharpe + 0.4 * sortino + 1.5 * total_return - 1.5 * abs(max_drawdown) - 0.75 * avg_turnover
+    if trade_count is not None and trade_count < 20:
+        score -= 0.75
+    if action_changes is not None and action_changes < 12:
+        score -= 0.50
+    if unique_actions is not None and unique_actions < 3:
+        score -= 0.50
+    return score
 
 
 def select_trend_rule(df):
@@ -191,6 +218,35 @@ def pretrain_ac(agent, env, rule, epochs=SUPERVISED_PRETRAIN_EPOCHS):
             optimizer.step()
 
 
+def teacher_weight_dataset_from_env(env, teacher_agent):
+    if teacher_agent is None or not hasattr(env, "portfolios"):
+        return np.asarray([]), np.asarray([])
+
+    states = []
+    target_distributions = []
+    state = env.reset()
+    done = False
+    old_epsilon = getattr(teacher_agent, "epsilon", None)
+    if old_epsilon is not None:
+        teacher_agent.epsilon = 0.0
+
+    while not done:
+        teacher_action = teacher_agent.act(state)
+
+        target = np.zeros(len(env.portfolios), dtype=np.float32)
+        target[int(teacher_action)] = 1.0
+
+        states.append(np.asarray(state, dtype=np.float32))
+        target_distributions.append(target)
+
+        next_state, _, done, info = env.step(teacher_action)
+        state = next_state
+
+    if old_epsilon is not None:
+        teacher_agent.epsilon = old_epsilon
+
+    return np.asarray(states, dtype=np.float32), np.asarray(target_distributions, dtype=np.float32)
+
 def evaluate_policy(env, agent, is_dqn=True):
     state = env.reset()
     done = False
@@ -198,6 +254,8 @@ def evaluate_policy(env, agent, is_dqn=True):
     turnovers = []
     net_worths = [env.initial_balance]
     net_worth = env.initial_balance
+    trade_count = 0
+    actions_taken = []
 
     old_epsilon = getattr(agent, "epsilon", None)
     if is_dqn:
@@ -208,10 +266,12 @@ def evaluate_policy(env, agent, is_dqn=True):
             action = agent.act(state)
         else:
             action, _, _ = agent.act(state, deterministic=True)
+        actions_taken.append(int(action) if np.isscalar(action) or np.asarray(action).size == 1 else tuple(np.asarray(action)))
         state, reward, done, info = env.step(action)
         returns.append(info["portfolio_return"])
         turnovers.append(info["turnover"])
         net_worth = info["net_worth"]
+        trade_count = int(info.get("trade_count", trade_count))
         net_worths.append(net_worth)
 
     if is_dqn and old_epsilon is not None:
@@ -222,7 +282,25 @@ def evaluate_policy(env, agent, is_dqn=True):
     avg_turnover = float(np.mean(turnovers)) if turnovers else 0.0
     equity = np.asarray(net_worths, dtype=np.float64)
     max_drawdown = float(np.min(equity / np.maximum.accumulate(equity) - 1.0))
-    return net_worth, sharpe, sortino, max_drawdown, avg_turnover
+    action_changes = sum(1 for i in range(1, len(actions_taken)) if actions_taken[i] != actions_taken[i - 1])
+    unique_actions = len(set(actions_taken))
+    return net_worth, sharpe, sortino, max_drawdown, avg_turnover, trade_count, action_changes, unique_actions
+
+
+def evaluate_validation_bundle(val_envs, agent, is_dqn=True):
+    if not isinstance(val_envs, (list, tuple)):
+        return evaluate_policy(val_envs, agent, is_dqn=is_dqn)
+
+    metrics = [evaluate_policy(env, agent, is_dqn=is_dqn) for env in val_envs]
+    avg_net = float(np.mean([m[0] for m in metrics]))
+    avg_sharpe = float(np.mean([m[1] for m in metrics]))
+    avg_sortino = float(np.mean([m[2] for m in metrics]))
+    avg_dd = float(np.mean([m[3] for m in metrics]))
+    avg_turnover = float(np.mean([m[4] for m in metrics]))
+    avg_trades = int(round(np.mean([m[5] for m in metrics])))
+    avg_action_changes = int(round(np.mean([m[6] for m in metrics])))
+    min_unique_actions = int(min(m[7] for m in metrics))
+    return avg_net, avg_sharpe, avg_sortino, avg_dd, avg_turnover, avg_trades, avg_action_changes, min_unique_actions
 
 
 def train_dqn(env, episodes=DQN_EPISODES, val_env=None, warm_start_rule=None):
@@ -260,12 +338,36 @@ def train_dqn(env, episodes=DQN_EPISODES, val_env=None, warm_start_rule=None):
 
         if (ep + 1) % 5 == 0 or ep == 0:
             if val_env is not None:
-                val_net, val_sharpe, val_sortino, val_dd, val_turnover = evaluate_policy(val_env, agent, is_dqn=True)
-                score = validation_score(val_net, val_sharpe, val_sortino, val_dd, val_turnover, env.initial_balance)
+                (
+                    val_net,
+                    val_sharpe,
+                    val_sortino,
+                    val_dd,
+                    val_turnover,
+                    val_trades,
+                    val_action_changes,
+                    val_unique_actions,
+                ) = evaluate_policy(
+                    val_env, agent, is_dqn=True
+                )
+                score = validation_score(
+                    val_net,
+                    val_sharpe,
+                    val_sortino,
+                    val_dd,
+                    val_turnover,
+                    env.initial_balance,
+                    trade_count=val_trades,
+                    action_changes=val_action_changes,
+                    unique_actions=val_unique_actions,
+                )
                 if score > best_score:
                     best_score = score
                     best_state = copy.deepcopy(agent.policy_net.state_dict())
-                val_msg = f" | ValNet: ${val_net:.0f} | ValSharpe: {val_sharpe:.2f}"
+                val_msg = (
+                    f" | ValNet: ${val_net:.0f} | ValSharpe: {val_sharpe:.2f}"
+                    f" | ValTrades: {val_trades} | ValActs: {val_action_changes}/{val_unique_actions}"
+                )
             else:
                 val_msg = ""
             print(
@@ -281,14 +383,26 @@ def train_dqn(env, episodes=DQN_EPISODES, val_env=None, warm_start_rule=None):
 
 def train_ac(env, episodes=AC_EPISODES, val_env=None, teacher_agent=None, warm_start_rule=None):
     print("\nStarting Actor-Critic training (online TD + DQN teacher regularization)...")
-    action_dim = env.action_space.shape[0] if hasattr(env.action_space, "shape") else 1
-    agent = ACAgent(state_dim=env.observation_space.shape, action_dim=action_dim)
+    action_dim = env.action_space.n if hasattr(env.action_space, "n") else env.action_space.shape[0]
+    agent = ACAgent(
+        state_dim=env.observation_space.shape,
+        action_dim=action_dim,
+        cash_logit_bias=getattr(env, "cash_logit_bias", 0.75),
+        ac_temperature=getattr(env, "ac_temperature", 1.35),
+    )
     if warm_start_rule is not None:
         print("Supervised warm-starting Actor-Critic from validation-selected trend rule...")
         pretrain_ac(agent, env, warm_start_rule)
+    if teacher_agent is not None and hasattr(env, "portfolios"):
+        print("Pretraining Actor-Critic on DQN teacher portfolio trajectory...")
+        teacher_states, teacher_targets = teacher_weight_dataset_from_env(env, teacher_agent)
+        pretrain_loss = agent.pretrain_from_teacher(teacher_states, teacher_targets, epochs=24, batch_size=64)
+        print(f"AC teacher pretrain loss: {pretrain_loss:.4f}")
     history = {"rewards": [], "loss": []}
     best_state = copy.deepcopy(agent.model.state_dict())
     best_score = -np.inf
+    best_ep = 0
+    best_val_snapshot = None
 
     for ep in range(episodes):
         state = env.reset()
@@ -307,9 +421,8 @@ def train_ac(env, episodes=AC_EPISODES, val_env=None, teacher_agent=None, warm_s
                     teacher_agent.epsilon = 0.0
                     teacher_action = teacher_agent.act(state)
                     teacher_agent.epsilon = old_epsilon
-                    asset_weights = env.portfolios[int(teacher_action)]
-                    cash_weight = max(0.0, 1.0 - float(np.sum(asset_weights)))
-                    imitation_target = np.asarray([cash_weight, *asset_weights], dtype=np.float32)
+                    imitation_target = np.zeros(len(env.portfolios), dtype=np.float32)
+                    imitation_target[int(teacher_action)] = 1.0
                 elif teacher_agent is not None and hasattr(env, "discrete_allocations"):
                     old_epsilon = teacher_agent.epsilon
                     teacher_agent.epsilon = 0.0
@@ -337,12 +450,53 @@ def train_ac(env, episodes=AC_EPISODES, val_env=None, teacher_agent=None, warm_s
 
         if (ep + 1) % 5 == 0 or ep == 0:
             if val_env is not None:
-                val_net, val_sharpe, val_sortino, val_dd, val_turnover = evaluate_policy(val_env, agent, is_dqn=False)
-                score = validation_score(val_net, val_sharpe, val_sortino, val_dd, val_turnover, env.initial_balance)
+                (
+                    val_net,
+                    val_sharpe,
+                    val_sortino,
+                    val_dd,
+                    val_turnover,
+                    val_trades,
+                    val_action_changes,
+                    val_unique_actions,
+                ) = evaluate_validation_bundle(val_env, agent, is_dqn=False)
+                score = validation_score(
+                    val_net,
+                    val_sharpe,
+                    val_sortino,
+                    val_dd,
+                    val_turnover,
+                    env.initial_balance,
+                    trade_count=val_trades,
+                    action_changes=val_action_changes,
+                    unique_actions=val_unique_actions,
+                )
+                if val_action_changes < 40:
+                    score -= 0.75
+                if val_unique_actions < 4:
+                    score -= 0.75
+                if val_action_changes < 20:
+                    score -= 1.00
+                if val_unique_actions < 3:
+                    score -= 2.00
                 if score > best_score:
                     best_score = score
                     best_state = copy.deepcopy(agent.model.state_dict())
-                val_msg = f" | ValNet: ${val_net:.0f} | ValSharpe: {val_sharpe:.2f}"
+                    best_ep = ep + 1
+                    best_val_snapshot = (
+                        val_net,
+                        val_sharpe,
+                        val_sortino,
+                        val_dd,
+                        val_turnover,
+                        val_trades,
+                        val_action_changes,
+                        val_unique_actions,
+                    )
+                val_msg = (
+                    f" | ValNet: ${val_net:.0f} | ValSharpe: {val_sharpe:.2f}"
+                    f" | ValTrades: {val_trades} | ValActs: {val_action_changes}/{val_unique_actions}"
+                )
             else:
                 val_msg = ""
             print(
@@ -352,6 +506,12 @@ def train_ac(env, episodes=AC_EPISODES, val_env=None, teacher_agent=None, warm_s
 
     if val_env is not None:
         agent.model.load_state_dict(best_state)
+        if best_val_snapshot is not None:
+            print(
+                "AC best checkpoint "
+                f"ep {best_ep} | ValNet: ${best_val_snapshot[0]:.0f} | ValSharpe: {best_val_snapshot[1]:.2f} "
+                f"| ValTrades: {best_val_snapshot[5]} | ValActs: {best_val_snapshot[6]}/{best_val_snapshot[7]}"
+            )
     return agent, history
 
 
@@ -380,16 +540,14 @@ def evaluate_and_log_trades(env, agent, test_df, model_name, is_dqn=True):
         else:
             action, _, _ = agent.act(state, deterministic=True)
 
-        if hasattr(env, "_target_weights"):
-            target_weights = env._smooth_target_weights(env._target_weights(action))
-            target = float(np.sum(target_weights))
-            target_repr = np.array2string(target_weights, precision=3, separator="|")
-        else:
-            target_weights = None
-            target = env._target_allocation(action)
-            target_repr = ""
-
         next_state, reward, done, info = env.step(action)
+        target = info.get("target_allocation", 0.0)
+        target_weights = info.get("weights")
+        target_repr = (
+            np.array2string(np.asarray(target_weights), precision=3, separator="|")
+            if target_weights is not None
+            else ""
+        )
         action_str = f"TARGET {target:.0%}"
 
         trade_log.append(
@@ -404,7 +562,7 @@ def evaluate_and_log_trades(env, agent, test_df, model_name, is_dqn=True):
                 "Net_Worth": info["net_worth"],
                 "Portfolio_Return": info["portfolio_return"],
                 "Reward": reward,
-                "Weights": target_repr if target_weights is not None else info.get("weights", ""),
+                "Weights": target_repr,
                 "Cash_Weight": info.get("cash_weight", ""),
             }
         )
@@ -498,9 +656,46 @@ if __name__ == "__main__":
     env_val_dqn = MultiAssetTradingEnv(val_df, window_size=window_size, is_discrete=True)
     env_test_dqn = MultiAssetTradingEnv(test_df, window_size=window_size, is_discrete=True)
 
-    env_train_ac = MultiAssetTradingEnv(model_train_df, window_size=window_size, is_discrete=False)
-    env_val_ac = MultiAssetTradingEnv(val_df, window_size=window_size, is_discrete=False)
-    env_test_ac = MultiAssetTradingEnv(test_df, window_size=window_size, is_discrete=False)
+    env_train_ac = MultiAssetTradingEnv(
+        model_train_df,
+        window_size=window_size,
+        is_discrete=True,
+        max_weight_delta=0.06,
+        max_total_allocation=0.60,
+        cash_logit_bias=0.90,
+        ac_temperature=1.20,
+        ac_mix_power=1.0,
+    )
+    val_len = len(val_df)
+    val_starts = [0, max(0, val_len // 3), max(0, (2 * val_len) // 3)]
+    val_ends = [max(window_size + 20, val_len // 3), max(2 * val_len // 3, window_size + 20), val_len]
+    ac_val_slices = []
+    for start_idx, end_idx in zip(val_starts, val_ends):
+        if end_idx - start_idx > window_size + 20:
+            ac_val_slices.append(slice_with_attrs(val_df, start_idx, end_idx))
+    env_val_ac = [
+        MultiAssetTradingEnv(
+            val_slice,
+            window_size=window_size,
+            is_discrete=True,
+            max_weight_delta=0.06,
+            max_total_allocation=0.60,
+            cash_logit_bias=0.90,
+            ac_temperature=1.20,
+            ac_mix_power=1.0,
+        )
+        for val_slice in ac_val_slices
+    ]
+    env_test_ac = MultiAssetTradingEnv(
+        test_df,
+        window_size=window_size,
+        is_discrete=True,
+        max_weight_delta=0.06,
+        max_total_allocation=0.60,
+        cash_logit_bias=0.90,
+        ac_temperature=1.20,
+        ac_mix_power=1.0,
+    )
 
     trained_dqn, dqn_history = train_dqn(
         env_train_dqn,
@@ -512,7 +707,7 @@ if __name__ == "__main__":
         env_train_ac,
         episodes=AC_EPISODES,
         val_env=env_val_ac,
-        teacher_agent=None,
+        teacher_agent=trained_dqn,
         warm_start_rule=None,
     )
 

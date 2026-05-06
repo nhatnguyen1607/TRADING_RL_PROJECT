@@ -1,30 +1,45 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 
 from models.ac_net import ActorCritic
 
 
 class ACAgent:
-    def __init__(self, state_dim, action_dim=1, lr=3e-4, gamma=0.995, gae_lambda=0.95, clip_ratio=0.20):
+    def __init__(
+        self,
+        state_dim,
+        action_dim=1,
+        lr=3e-4,
+        gamma=0.995,
+        gae_lambda=0.95,
+        clip_ratio=0.20,
+        cash_logit_bias=0.75,
+        ac_temperature=1.35,
+    ):
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_ratio = clip_ratio
-        self.cash_logit_bias = 0.75
-        self.ac_temperature = 1.35
+        self.cash_logit_bias = cash_logit_bias
+        self.ac_temperature = ac_temperature
         self.model = ActorCritic(state_dim, action_dim=action_dim)
+        self.is_discrete = action_dim > 1
         self.optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
 
     def act(self, state, deterministic=False):
         state_tensor = torch.FloatTensor(state).unsqueeze(0)
         action, log_prob, dist = self.model.get_action(state_tensor, deterministic=deterministic)
-        return action.detach().numpy()[0], log_prob, dist
+        action_np = action.detach().cpu().numpy()
+        if self.is_discrete:
+            return int(action_np.reshape(-1)[0]), log_prob, dist
+        return action_np[0], log_prob, dist
 
     def train_step(self, state, log_prob, dist, reward, next_state, done, imitation_target=None):
         state_tensor = torch.FloatTensor(np.asarray(state)).unsqueeze(0)
         next_state_tensor = torch.FloatTensor(np.asarray(next_state)).unsqueeze(0)
 
-        mean, _, value = self.model(state_tensor)
+        actor_output, _, value = self.model(state_tensor)
         with torch.no_grad():
             _, _, next_value = self.model(next_state_tensor)
 
@@ -37,18 +52,16 @@ class ACAgent:
         imitation_loss = torch.tensor(0.0)
         if imitation_target is not None:
             target_arr = np.asarray(imitation_target, dtype=np.float32).reshape(-1)
-            if target_arr.size == mean.shape[-1]:
+            if target_arr.size == actor_output.shape[-1]:
                 target_tensor = torch.as_tensor(target_arr.reshape(1, -1), dtype=torch.float32)
-                logits = mean / self.ac_temperature
-                logits = logits.clone()
-                logits[:, 0] += self.cash_logit_bias
-                pred_weights = torch.softmax(logits, dim=-1)
-                imitation_loss = (pred_weights - target_tensor).pow(2).mean()
+                logits = actor_output
+                log_probs = torch.log_softmax(logits, dim=-1)
+                imitation_loss = -(target_tensor * log_probs).sum(dim=-1).mean()
             else:
                 target_tensor = torch.as_tensor([[float(target_arr[0])]], dtype=torch.float32)
-                imitation_loss = (mean - target_tensor).pow(2).mean()
+                imitation_loss = (actor_output - target_tensor).pow(2).mean()
 
-        total_loss = actor_loss + 0.7 * critic_loss + 0.05 * imitation_loss - 0.001 * entropy
+        total_loss = actor_loss + 0.7 * critic_loss + 0.10 * imitation_loss - 0.0015 * entropy
 
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -56,6 +69,31 @@ class ACAgent:
         self.optimizer.step()
 
         return total_loss.item()
+
+    def pretrain_from_teacher(self, states, target_weight_vectors, epochs=6, batch_size=128):
+        if len(states) == 0:
+            return 0.0
+
+        states_tensor = torch.FloatTensor(np.asarray(states))
+        targets_tensor = torch.FloatTensor(np.asarray(target_weight_vectors))
+        indices = np.arange(len(states))
+        losses = []
+
+        for _ in range(epochs):
+            np.random.shuffle(indices)
+            for start in range(0, len(indices), batch_size):
+                batch_idx = torch.LongTensor(indices[start : start + batch_size])
+                logits, _, _ = self.model(states_tensor[batch_idx])
+                log_probs = torch.log_softmax(logits, dim=-1)
+                loss = -(targets_tensor[batch_idx] * log_probs).sum(dim=-1).mean()
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+                losses.append(loss.item())
+
+        return float(np.mean(losses)) if losses else 0.0
 
     def train_trajectory(self, states, actions, rewards, dones, old_log_probs, ppo_epochs=4, minibatch_size=128):
         states_tensor = torch.FloatTensor(np.asarray(states))

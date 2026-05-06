@@ -13,6 +13,11 @@ class TradingEnv(gym.Env):
         initial_balance=10000.0,
         transaction_cost=0.001,
         is_discrete=True,
+        max_weight_delta=0.08,
+        max_total_allocation=0.70,
+        cash_logit_bias=0.75,
+        ac_temperature=1.35,
+        ac_mix_power=1.0,
     ):
         super(TradingEnv, self).__init__()
 
@@ -219,6 +224,11 @@ class MultiAssetTradingEnv(gym.Env):
         initial_balance=10000.0,
         transaction_cost=0.001,
         is_discrete=True,
+        max_weight_delta=0.08,
+        max_total_allocation=0.70,
+        cash_logit_bias=0.75,
+        ac_temperature=1.35,
+        ac_mix_power=1.0,
     ):
         super(MultiAssetTradingEnv, self).__init__()
 
@@ -230,22 +240,23 @@ class MultiAssetTradingEnv(gym.Env):
         self.feature_cols = df.attrs.get("feature_cols", [])
         self.asset_cols = df.attrs.get("asset_cols", [])
         self.tickers = df.attrs.get("tickers", [col.replace("Close_", "") for col in self.asset_cols])
-        self.max_weight_delta = 0.08
-        self.max_total_allocation = 0.70
-        self.cash_logit_bias = 0.75
-        self.ac_temperature = 1.35
+        self.max_weight_delta = max_weight_delta
+        self.max_total_allocation = max_total_allocation
+        self.cash_logit_bias = cash_logit_bias
+        self.ac_temperature = ac_temperature
+        self.ac_mix_power = ac_mix_power
 
         if not self.feature_cols or not self.asset_cols:
             raise ValueError("MultiAssetTradingEnv requires feature_cols and asset_cols attrs.")
 
         self.n_assets = len(self.asset_cols)
         self.state_shape = (self.window_size, len(self.feature_cols) + self.n_assets + 1)
+        self.portfolios = self._build_portfolios()
 
         if self.is_discrete:
-            self.portfolios = self._build_portfolios()
             self.action_space = spaces.Discrete(len(self.portfolios))
         else:
-            self.action_space = spaces.Box(low=-5, high=5, shape=(self.n_assets + 1,), dtype=np.float32)
+            self.action_space = spaces.Box(low=-5, high=5, shape=(len(self.portfolios),), dtype=np.float32)
 
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=self.state_shape, dtype=np.float32)
         self.reset()
@@ -298,7 +309,10 @@ class MultiAssetTradingEnv(gym.Env):
             logits = logits - np.max(logits)
             probs = np.exp(logits)
             probs = probs / np.sum(probs)
-            weights = probs[1:].astype(np.float32)
+            probs = np.power(probs, self.ac_mix_power)
+            probs = probs / np.sum(probs)
+            portfolio_matrix = np.stack(self.portfolios, axis=0).astype(np.float64)
+            weights = probs @ portfolio_matrix
 
         weights = np.clip(weights, 0.0, 1.0)
         total = float(np.sum(weights))
