@@ -1,4 +1,25 @@
 import os
+import shutil
+import tempfile
+
+def _ensure_ascii_cert_bundle():
+    try:
+        import certifi
+
+        cert_path = certifi.where()
+        temp_dir = tempfile.gettempdir()
+        ascii_cert = os.path.join(temp_dir, "cacert.pem")
+        if not os.path.exists(ascii_cert):
+            shutil.copy(cert_path, ascii_cert)
+
+        os.environ.setdefault("REQUESTS_CA_BUNDLE", ascii_cert)
+        os.environ.setdefault("CURL_CA_BUNDLE", ascii_cert)
+        os.environ.setdefault("SSL_CERT_FILE", ascii_cert)
+    except Exception:
+        pass
+
+_ensure_ascii_cert_bundle()
+
 import yfinance as yf
 import pandas as pd
 import numpy as np
