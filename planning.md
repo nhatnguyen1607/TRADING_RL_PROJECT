@@ -33,7 +33,7 @@ Status:
 
 ## Success Thresholds
 
-- Annualized Sharpe ratio > 1.25 on the test split.
+- Annualized Sharpe ratio > 1.25 on the test split.F
 - Final net worth > Buy & Hold final net worth on the same test split.
 - Final net worth > $10,000 initial capital.
 - At least 20 meaningful allocation changes in the test trade log.

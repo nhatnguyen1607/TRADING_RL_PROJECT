@@ -25,6 +25,13 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
+
+DEFAULT_MACRO_TICKERS = {
+    "US10Y": "^TNX",
+    "US2Y": "^UST2Y",
+    "DXY": "DX-Y.NYB",
+}
+
 def calculate_technical_indicators(df):
     # 1. Các đường trung bình
     df['SMA_5'] = df['Close'].rolling(window=5).mean()
@@ -83,7 +90,51 @@ def calculate_technical_indicators(df):
     
     return df
 
-def load_and_preprocess_data(ticker="SPY", start="2015-01-01", end="2023-01-01", scale=True):
+
+def _download_close_series(ticker, start, end, name):
+    try:
+        data = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+        if data.empty or "Close" not in data.columns:
+            print(f"Macro source skipped: {name} ({ticker}) returned no Close data.")
+            return None
+        series = data["Close"].rename(name).astype(float)
+        return series
+    except Exception as exc:
+        print(f"Macro source skipped: {name} ({ticker}) failed with {exc}")
+        return None
+
+
+def load_macro_features(start, end, macro_tickers=None):
+    """Load macro regime variables and transform them into stationary features."""
+    macro_tickers = macro_tickers or DEFAULT_MACRO_TICKERS
+    series = []
+    for name, ticker in macro_tickers.items():
+        close = _download_close_series(ticker, start, end, name)
+        if close is not None:
+            series.append(close)
+
+    if not series:
+        return pd.DataFrame(), []
+
+    macro = pd.concat(series, axis=1).sort_index().ffill()
+    feature_cols = []
+
+    for col in list(macro.columns):
+        macro[f"Macro_{col}_Level"] = macro[col]
+        macro[f"Macro_{col}_Change"] = macro[col].pct_change()
+        macro[f"Macro_{col}_Z20"] = (macro[col] - macro[col].rolling(20).mean()) / (macro[col].rolling(20).std() + 1e-8)
+        feature_cols.extend([f"Macro_{col}_Level", f"Macro_{col}_Change", f"Macro_{col}_Z20"])
+
+    if {"US10Y", "US2Y"}.issubset(macro.columns):
+        macro["Macro_YieldCurve_10Y2Y"] = macro["US10Y"] - macro["US2Y"]
+        macro["Macro_YieldCurve_Inverted"] = (macro["Macro_YieldCurve_10Y2Y"] < 0).astype(float)
+        feature_cols.extend(["Macro_YieldCurve_10Y2Y", "Macro_YieldCurve_Inverted"])
+
+    return macro[feature_cols], feature_cols
+
+def load_and_preprocess_data(ticker="SPY", start="2015-01-01", end="2023-01-01", scale=True, include_macro=True):
     print(f"Downloading data for {ticker} and ^VIX from Yahoo Finance...")
 
     cache_dir = os.path.join(os.getcwd(), "data", "yf_cache")
@@ -107,6 +158,11 @@ def load_and_preprocess_data(ticker="SPY", start="2015-01-01", end="2023-01-01",
         
     df['VIX'] = vix['Close']
     df = calculate_technical_indicators(df)
+    macro_cols = []
+    if include_macro:
+        macro_df, macro_cols = load_macro_features(start, end)
+        if not macro_df.empty:
+            df = df.join(macro_df, how="left").ffill()
     df.dropna(inplace=True)
     
     # 🚀 CHỈ ĐƯA CÁC ĐẶC TRƯNG TĨNH (STATIONARY) VÀO CHO AI HỌC
@@ -118,7 +174,7 @@ def load_and_preprocess_data(ticker="SPY", start="2015-01-01", end="2023-01-01",
         'Momentum_10', 'Momentum_20', 'Momentum_60',
         'Volatility_20', 'SMA20_Slope', 'SMA50_Slope',
         'Trend_Regime'
-    ]
+    ] + macro_cols
     
     scaler = None
     if scale:
@@ -132,7 +188,7 @@ def load_and_preprocess_data(ticker="SPY", start="2015-01-01", end="2023-01-01",
     return df, scaler
 
 
-def load_multi_asset_data(tickers=None, start="2015-01-01", end="2023-01-01", scale=True):
+def load_multi_asset_data(tickers=None, start="2015-01-01", end="2023-01-01", scale=True, include_macro=True):
     if tickers is None:
         tickers = ["SPY", "SH", "TLT"]
 
@@ -152,6 +208,7 @@ def load_multi_asset_data(tickers=None, start="2015-01-01", end="2023-01-01", sc
     asset_frames = []
     feature_cols = []
     close_cols = []
+    macro_df, macro_cols = (load_macro_features(start, end) if include_macro else (pd.DataFrame(), []))
 
     for ticker in tickers:
         raw = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
@@ -183,7 +240,11 @@ def load_multi_asset_data(tickers=None, start="2015-01-01", end="2023-01-01", sc
         keep_cols = [close_col] + base_features
         asset_frames.append(asset_df[keep_cols].rename(columns=rename_map))
 
-    df = pd.concat(asset_frames, axis=1).dropna()
+    df = pd.concat(asset_frames, axis=1)
+    if include_macro and not macro_df.empty:
+        df = df.join(macro_df, how="left").ffill()
+        feature_cols.extend(macro_cols)
+    df = df.dropna()
     scaler = None
     if scale:
         scaler = StandardScaler()

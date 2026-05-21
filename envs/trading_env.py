@@ -19,6 +19,11 @@ class TradingEnv(gym.Env):
         ac_temperature=1.35,
         ac_mix_power=1.0,
         concentration_penalty_coef=0.0,
+        reward_mode="heuristic",
+        risk_aversion=3.0,
+        cvar_alpha=0.95,
+        tail_risk_coef=0.25,
+        tail_window=60,
     ):
         super(TradingEnv, self).__init__()
 
@@ -32,6 +37,11 @@ class TradingEnv(gym.Env):
         self.target_daily_vol = None
         self.regime_blend = 0.0
         self.rule_fallback_weight = 0.0
+        self.reward_mode = reward_mode
+        self.risk_aversion = risk_aversion
+        self.cvar_alpha = cvar_alpha
+        self.tail_risk_coef = tail_risk_coef
+        self.tail_window = tail_window
 
         if not self.feature_cols:
             raise ValueError("TradingEnv requires df.attrs['feature_cols'] to be populated.")
@@ -57,6 +67,7 @@ class TradingEnv(gym.Env):
         self.prev_allocation = 0.0
         self.cash_idle_steps = 0
         self.trade_count = 0
+        self.return_history = []
         return self._get_obs()
 
     def _get_obs(self):
@@ -143,6 +154,25 @@ class TradingEnv(gym.Env):
             return 0.0008 * max(-allocation, 0.0)
         return 0.0
 
+    def _tail_risk_penalty(self):
+        if len(self.return_history) < max(10, self.tail_window // 3):
+            return 0.0
+        recent = np.asarray(self.return_history[-self.tail_window :], dtype=np.float64)
+        losses = -recent
+        var = np.quantile(losses, self.cvar_alpha)
+        tail_losses = losses[losses >= var]
+        return float(np.mean(tail_losses)) if len(tail_losses) else float(var)
+
+    def _utility_reward(self, portfolio_return, turnover, drawdown, allocation):
+        gamma = max(float(self.risk_aversion), 1e-6)
+        clipped_return = float(np.clip(portfolio_return, -0.20, 0.20))
+        utility_gain = (1.0 - np.exp(-gamma * clipped_return)) / gamma
+        tail_penalty = self.tail_risk_coef * self._tail_risk_penalty()
+        turnover_penalty = 0.0030 * turnover
+        drawdown_penalty = 0.0015 * drawdown
+        borrow_penalty = 0.00015 * abs(min(allocation, 0.0))
+        return utility_gain - tail_penalty - turnover_penalty - drawdown_penalty - borrow_penalty
+
     def _rebalance_to(self, target_allocation, price):
         portfolio_value = self.balance + self.shares_held * price
         target_position_value = portfolio_value * target_allocation
@@ -177,20 +207,24 @@ class TradingEnv(gym.Env):
         drawdown = (self.max_net_worth - self.net_worth) / max(self.max_net_worth, 1e-8)
 
         borrow_penalty = 0.00015 * abs(min(realized_allocation, 0.0))
-        downside_penalty = 0.15 * abs(min(raw_return, 0.0))
-        turnover_penalty = 0.0025 * turnover
-        drawdown_penalty = 0.0025 * drawdown
-        leverage_penalty = 0.0005 * max(abs(realized_allocation) - 1.0, 0.0)
-        regime_penalty = self._regime_alignment_penalty(realized_allocation)
-        reward = (
-            log_return
-            - downside_penalty
-            - turnover_penalty
-            - drawdown_penalty
-            - borrow_penalty
-            - leverage_penalty
-            - regime_penalty
-        ) * 100.0
+        self.return_history.append(raw_return)
+        if self.reward_mode == "utility_cvar":
+            reward = self._utility_reward(raw_return, turnover, drawdown, realized_allocation) * 100.0
+        else:
+            downside_penalty = 0.15 * abs(min(raw_return, 0.0))
+            turnover_penalty = 0.0025 * turnover
+            drawdown_penalty = 0.0025 * drawdown
+            leverage_penalty = 0.0005 * max(abs(realized_allocation) - 1.0, 0.0)
+            regime_penalty = self._regime_alignment_penalty(realized_allocation)
+            reward = (
+                log_return
+                - downside_penalty
+                - turnover_penalty
+                - drawdown_penalty
+                - borrow_penalty
+                - leverage_penalty
+                - regime_penalty
+            ) * 100.0
         reward = float(np.clip(reward, -5.0, 5.0))
 
         self.prev_allocation = realized_allocation
@@ -231,6 +265,11 @@ class MultiAssetTradingEnv(gym.Env):
         ac_temperature=1.35,
         ac_mix_power=1.0,
         concentration_penalty_coef=0.0,
+        reward_mode="heuristic",
+        risk_aversion=3.0,
+        cvar_alpha=0.95,
+        tail_risk_coef=0.25,
+        tail_window=60,
     ):
         super(MultiAssetTradingEnv, self).__init__()
 
@@ -248,6 +287,11 @@ class MultiAssetTradingEnv(gym.Env):
         self.ac_temperature = ac_temperature
         self.ac_mix_power = ac_mix_power
         self.concentration_penalty_coef = concentration_penalty_coef
+        self.reward_mode = reward_mode
+        self.risk_aversion = risk_aversion
+        self.cvar_alpha = cvar_alpha
+        self.tail_risk_coef = tail_risk_coef
+        self.tail_window = tail_window
 
         if not self.feature_cols or not self.asset_cols:
             raise ValueError("MultiAssetTradingEnv requires feature_cols and asset_cols attrs.")
@@ -291,6 +335,7 @@ class MultiAssetTradingEnv(gym.Env):
         self.cash_weight = 1.0
         self.done = False
         self.trade_count = 0
+        self.return_history = []
         return self._get_obs()
 
     def _get_obs(self):
@@ -308,7 +353,7 @@ class MultiAssetTradingEnv(gym.Env):
             logits = np.asarray(action, dtype=np.float64).reshape(-1)
             logits = np.clip(logits, -5, 5)
             logits = logits / self.ac_temperature
-            logits[0] += self.cash_logit_bias
+            logits[0] += self.cash_logit_bias #
             logits = logits - np.max(logits)
             probs = np.exp(logits)
             probs = probs / np.sum(probs)
@@ -320,17 +365,36 @@ class MultiAssetTradingEnv(gym.Env):
         weights = np.clip(weights, 0.0, 1.0)
         total = float(np.sum(weights))
         if total > self.max_total_allocation:
-            weights = weights / total * self.max_total_allocation
+            weights = weights / total * self.max_total_allocation #
         return weights.astype(np.float32)
 
     def _smooth_target_weights(self, target_weights):
-        delta = np.clip(target_weights - self.weights, -self.max_weight_delta, self.max_weight_delta)
+        delta = np.clip(target_weights - self.weights, -self.max_weight_delta, self.max_weight_delta) #
         smoothed = self.weights + delta
         smoothed = np.clip(smoothed, 0.0, 1.0)
         total = float(np.sum(smoothed))
         if total > self.max_total_allocation:
             smoothed = smoothed / total * self.max_total_allocation
         return smoothed.astype(np.float32)
+
+    def _tail_risk_penalty(self):
+        if len(self.return_history) < max(10, self.tail_window // 3):
+            return 0.0
+        recent = np.asarray(self.return_history[-self.tail_window :], dtype=np.float64)
+        losses = -recent
+        var = np.quantile(losses, self.cvar_alpha)
+        tail_losses = losses[losses >= var]
+        return float(np.mean(tail_losses)) if len(tail_losses) else float(var)
+
+    def _utility_reward(self, portfolio_return, turnover, drawdown, max_asset_weight):
+        gamma = max(float(self.risk_aversion), 1e-6)
+        clipped_return = float(np.clip(portfolio_return, -0.20, 0.20))
+        utility_gain = (1.0 - np.exp(-gamma * clipped_return)) / gamma
+        tail_penalty = self.tail_risk_coef * self._tail_risk_penalty()
+        turnover_penalty = 0.0040 * turnover
+        concentration_penalty = self.concentration_penalty_coef * max(max_asset_weight - 0.45, 0.0)
+        drawdown_penalty = 0.0015 * drawdown
+        return utility_gain - tail_penalty - turnover_penalty - drawdown_penalty - concentration_penalty
 
     def step(self, action):
         prev_net_worth = self.net_worth
@@ -353,20 +417,24 @@ class MultiAssetTradingEnv(gym.Env):
         self.max_net_worth = max(self.max_net_worth, self.net_worth)
 
         portfolio_return = self.net_worth / max(prev_net_worth, 1e-8) - 1.0
-        log_return = np.log(max(self.net_worth, 1e-8) / max(prev_net_worth, 1e-8))
+        log_return = np.log(max(self.net_worth, 1e-8) / max(prev_net_worth, 1e-8)) #    
         drawdown = (self.max_net_worth - self.net_worth) / max(self.max_net_worth, 1e-8)
-        downside_penalty = 0.10 * abs(min(portfolio_return, 0.0))
-        turnover_penalty = 0.0050 * turnover
-        drawdown_penalty = 0.0030 * drawdown
         max_asset_weight = float(np.max(self.weights)) if len(self.weights) else 0.0
-        concentration_penalty = self.concentration_penalty_coef * max(max_asset_weight - 0.45, 0.0)
-        reward = (
-            log_return
-            - downside_penalty
-            - turnover_penalty
-            - drawdown_penalty
-            - concentration_penalty
-        ) * 100.0
+        self.return_history.append(portfolio_return)
+        if self.reward_mode == "utility_cvar":
+            reward = self._utility_reward(portfolio_return, turnover, drawdown, max_asset_weight) * 100.0
+        else:
+            downside_penalty = 0.10 * abs(min(portfolio_return, 0.0))
+            turnover_penalty = 0.0050 * turnover
+            drawdown_penalty = 0.0030 * drawdown
+            concentration_penalty = self.concentration_penalty_coef * max(max_asset_weight - 0.45, 0.0) #
+            reward = (
+                log_return
+                - downside_penalty
+                - turnover_penalty
+                - drawdown_penalty
+                - concentration_penalty
+            ) * 100.0
         reward = float(np.clip(reward, -5.0, 5.0))
 
         self.current_step += 1

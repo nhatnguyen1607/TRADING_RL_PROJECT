@@ -17,13 +17,22 @@ class ACAgent:
         clip_ratio=0.20,
         cash_logit_bias=0.75,
         ac_temperature=1.35,
+        encoder_type="gru",
+        n_assets=3,
+        asset_feature_dim=None,
     ):
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_ratio = clip_ratio
         self.cash_logit_bias = cash_logit_bias
         self.ac_temperature = ac_temperature
-        self.model = ActorCritic(state_dim, action_dim=action_dim)
+        self.model = ActorCritic(
+            state_dim,
+            action_dim=action_dim,
+            encoder_type=encoder_type,
+            n_assets=n_assets,
+            asset_feature_dim=asset_feature_dim,
+        )
         self.is_discrete = action_dim > 1
         self.optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
 

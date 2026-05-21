@@ -2,28 +2,54 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical, Normal
 
+from models.research_layers import DynamicCorrelationGraphEncoder, TemporalTransformerEncoder, infer_multi_asset_layout
+
 
 class ActorCritic(nn.Module):
-    """Actor-Critic with a GRU encoder and bounded allocation policy."""
+    """Actor-Critic with selectable temporal encoders for research ablations."""
 
-    def __init__(self, input_dim, action_dim=1):
+    def __init__(self, input_dim, action_dim=1, encoder_type="gru", n_assets=3, asset_feature_dim=None):
         super(ActorCritic, self).__init__()
 
         self.sequence_shape = input_dim if isinstance(input_dim, tuple) else None
         feature_dim = input_dim[-1] if isinstance(input_dim, tuple) else input_dim
         self.action_dim = action_dim
-        self.is_discrete = action_dim > 1
+        self.is_discrete = action_dim > 1 #
+        self.encoder_type = encoder_type
 
-        self.input_norm = nn.LayerNorm(feature_dim)
-        self.encoder = nn.GRU(
-            input_size=feature_dim,
-            hidden_size=64,
-            num_layers=1,
-            batch_first=True,
-        )
+        encoder_output_dim = 64
+        if encoder_type == "gru":
+            self.input_norm = nn.LayerNorm(feature_dim)
+            self.encoder = nn.GRU(
+                input_size=feature_dim,
+                hidden_size=64,
+                num_layers=1,
+                batch_first=True,
+            )
+        elif encoder_type == "transformer":
+            self.encoder = TemporalTransformerEncoder(feature_dim, hidden_dim=96, n_heads=4, n_layers=2)
+            encoder_output_dim = 96
+        elif encoder_type == "graph_transformer":
+            layout = infer_multi_asset_layout(input_dim, n_assets=n_assets, asset_feature_dim=asset_feature_dim)
+            if layout is None:
+                raise ValueError("graph_transformer requires multi-asset sequence input with account features.")
+            inferred_assets, asset_feature_dim, account_dim = layout
+            self.encoder = DynamicCorrelationGraphEncoder(
+                input_dim=feature_dim,
+                n_assets=inferred_assets,
+                asset_feature_dim=asset_feature_dim,
+                account_dim=account_dim,
+                hidden_dim=96,
+                n_heads=4,
+                n_layers=2,
+            )
+            encoder_output_dim = 96
+        else:
+            raise ValueError(f"Unknown encoder_type: {encoder_type}")
+
         self.shared_layers = nn.Sequential(
-            nn.LayerNorm(64),
-            nn.Linear(64, 64),
+            nn.LayerNorm(encoder_output_dim),
+            nn.Linear(encoder_output_dim, 64),
             nn.ReLU(),
         )
 
@@ -48,9 +74,13 @@ class ActorCritic(nn.Module):
             else:
                 x = x.view(x.size(0), self.sequence_shape[0], self.sequence_shape[1])
 
-        x = self.input_norm(x)
-        _, hidden = self.encoder(x)
-        shared = self.shared_layers(hidden[-1])
+        if self.encoder_type == "gru":
+            x = self.input_norm(x)
+            _, hidden = self.encoder(x)
+            encoded = hidden[-1]
+        else:
+            encoded = self.encoder(x)
+        shared = self.shared_layers(encoded)
 
         value = self.critic(shared)
         actor_output = self.actor_mean(shared)
