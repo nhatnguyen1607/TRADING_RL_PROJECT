@@ -20,12 +20,22 @@ class ACAgent:
         encoder_type="gru",
         n_assets=3,
         asset_feature_dim=None,
+        critic_target_mode="td",
+        ez_risk_aversion=6.0,
+        ez_eis=1.5,
+        imitation_coef=0.05,
+        entropy_coef=0.0020,
     ):
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_ratio = clip_ratio
         self.cash_logit_bias = cash_logit_bias
         self.ac_temperature = ac_temperature
+        self.critic_target_mode = critic_target_mode
+        self.ez_risk_aversion = ez_risk_aversion
+        self.ez_eis = ez_eis
+        self.imitation_coef = imitation_coef
+        self.entropy_coef = entropy_coef
         self.model = ActorCritic(
             state_dim,
             action_dim=action_dim,
@@ -35,6 +45,23 @@ class ACAgent:
         )
         self.is_discrete = action_dim > 1
         self.optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
+
+    def _critic_target(self, reward, next_value, done):
+        reward_tensor = torch.as_tensor([[reward]], dtype=torch.float32)
+        if self.critic_target_mode != "epstein_zin":
+            return reward_tensor + self.gamma * next_value * (1 - int(done))
+
+        gamma = max(float(self.ez_risk_aversion), 1e-6)
+        psi = max(float(self.ez_eis), 1e-6)
+        rho = 1.0 - 1.0 / psi
+        alpha = 1.0 - gamma
+
+        reward_scaled = torch.clamp(reward_tensor / 100.0, min=-0.95, max=0.95)
+        consumption_utility = torch.sign(reward_scaled) * torch.log1p(torch.abs(reward_scaled))
+        continuation = torch.sign(next_value) * torch.pow(torch.abs(next_value) + 1e-6, alpha)
+        certainty_equivalent = torch.sign(continuation) * torch.pow(torch.abs(continuation) + 1e-6, rho / alpha)
+        recursive_value = (1.0 - self.gamma) * consumption_utility + self.gamma * certainty_equivalent * (1 - int(done))
+        return torch.sign(recursive_value) * torch.pow(torch.abs(recursive_value) + 1e-6, 1.0 / max(rho, 1e-6)) * 100.0
 
     def act(self, state, deterministic=False):
         state_tensor = torch.FloatTensor(state).unsqueeze(0)
@@ -52,7 +79,7 @@ class ACAgent:
         with torch.no_grad():
             _, _, next_value = self.model(next_state_tensor)
 
-        td_target = torch.as_tensor([[reward]], dtype=torch.float32) + self.gamma * next_value * (1 - int(done))
+        td_target = self._critic_target(reward, next_value, done)
         advantage = td_target - value
 
         critic_loss = advantage.pow(2).mean()
@@ -70,7 +97,7 @@ class ACAgent:
                 target_tensor = torch.as_tensor([[float(target_arr[0])]], dtype=torch.float32)
                 imitation_loss = (actor_output - target_tensor).pow(2).mean()
 
-        total_loss = actor_loss + 0.7 * critic_loss + 0.10 * imitation_loss - 0.0015 * entropy
+        total_loss = actor_loss + 0.7 * critic_loss + self.imitation_coef * imitation_loss - self.entropy_coef * entropy
 
         self.optimizer.zero_grad()
         total_loss.backward()

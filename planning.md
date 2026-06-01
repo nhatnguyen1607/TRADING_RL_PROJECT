@@ -1,5 +1,500 @@
 # RL Trading Improvement Plan
 
+## Research Experiment Log - Current Multi-Asset Pipeline
+
+Test protocol:
+
+- Universe: `SPY`, `SH`, `TLT`.
+- Test period represented by the current split: approximately July 2021 through December 2022.
+- Buy & Hold SPY final net worth: `$8,714.76`.
+- Primary comparison metrics: final net worth, Sharpe, Sortino, max drawdown, turnover, action/template behavior.
+- Rule for future work: record every completed experimental run in this section before starting the next algorithmic change.
+
+### Archived Positive Baseline Before Current Research Extensions
+
+- Recovery source: `planning.md` in Git commit `8a2018b`.
+- Raw CSV/report files had previously been overwritten and cannot be recovered byte-for-byte.
+- Runnable source snapshot restored at: `archived_runs/positive_baseline_8a2018b`.
+- Permanent metric reference: `results/baseline_positive_reference/README.md`.
+- DQN final net worth: `$10,526.35`; Sharpe `0.4856`; Sortino `0.7717`; max drawdown `-5.50%`; meaningful trades `276`.
+- Actor-Critic final net worth: `$10,780.55`; Sharpe `0.5523`; Sortino `0.8930`; max drawdown `-9.48%`; meaningful trades `179`.
+- Buy & Hold final net worth: `$8,714.76`.
+- Reporting role: historical positive baseline where both compared agents were profitable before the current novelty experiments.
+- Reproduction status: completed on `2026-05-25`; outputs in `results/baseline_positive_reproduction` exactly match the documented metrics above.
+- Important label: the regenerated files are reproduction artifacts from the archived source snapshot, not the overwritten original files.
+
+### Current Reference Baseline - DQN
+
+- Result source: `results/research/dqn_report.txt` (same reproducible DQN result across recent comparison runs).
+- Final net worth: `$10,715.79`.
+- Sharpe: `0.6167`.
+- Sortino: `0.9873`.
+- Max drawdown: `-7.14%`.
+- Average daily turnover: `12.53%`.
+- Dominant portfolio template: `[0.45 SPY | 0.00 SH | 0.25 TLT]`, share `18.33%`.
+- Assessment: strongest verified agent so far. It successfully uses `SH`/`TLT` defensive templates during the downtrend split.
+
+### Experiment - PPO Actor-Critic
+
+- Result source: `results/research/ac_report.txt`.
+- Final net worth: `$9,013.62`.
+- Sharpe: `-0.7416`.
+- Sortino: `-1.0993`.
+- Max drawdown: `-14.09%`.
+- Average daily turnover: `3.00%`.
+- Dominant portfolio template: `[0.60 SPY | 0.00 SH | 0.00 TLT]`, share `41.94%`.
+- Hypothesis tested: replace unstable online AC updates with PPO/GAE trajectory learning.
+- Outcome: loss stability improved, but out-of-sample policy remained long-biased and unprofitable.
+- Decision: retain as an Actor-Critic comparison baseline, not as the primary model.
+
+### Experiment - Discrete SAC
+
+- Result source: `results/sac_v3/sac_report.txt` (reproduces the retained plain Discrete SAC configuration).
+- Final net worth: `$10,363.83`.
+- Sharpe: `0.2646`.
+- Sortino: `0.3894`.
+- Max drawdown: `-12.08%`.
+- Average daily turnover: `9.52%`.
+- Dominant portfolio template: `[0.70 SPY | 0.00 SH | 0.00 TLT]`, share `29.72%`.
+- Hypothesis tested: entropy-regularized off-policy actor-critic may improve policy search over discrete portfolio templates.
+- Outcome: profitable and above Buy & Hold, but inferior to DQN because the policy remains too equity-long during the bear split.
+- Negative ablation: the discarded SAC overlay run added entropy/teacher/hedge overlays and collapsed to Sharpe `-1.7063`; its raw folder is not retained.
+- Decision: retain plain Discrete SAC as a valid agent comparator; do not use the failed v2 overlays.
+
+### Experiment - Fixed-CVaR QR-DQN
+
+- Result source: archived result summary below; implementation and raw result folder removed after the negative ablation was documented.
+- Final net worth: `$9,650.92`.
+- Sharpe: `-0.2576`.
+- Sortino: `-0.3626`.
+- Max drawdown: `-10.87%`.
+- Average daily turnover: `12.59%`.
+- Hypothesis tested: distributional quantile critic with fixed lower-tail CVaR action scoring should improve tail-risk control.
+- Outcome: failed to outperform DQN or initial capital. It held cash early, then became SPY-heavy late in 2022.
+- Decision: use as a negative ablation demonstrating that static CVaR preference is insufficient under market regime shift.
+
+### Experiment - Regime-Conditioned CVaR QR-DQN
+
+- Result source: archived result summary below; implementation and raw result folder removed after the negative ablation was documented.
+- Final net worth: `$8,789.10`.
+- Sharpe: `-0.7452`.
+- Sortino: `-1.1412`.
+- Max drawdown: `-16.51%`.
+- Average daily turnover: `8.89%`.
+- Average policy risk weight: `0.6292`.
+- Hypothesis tested: make CVaR risk preference state-dependent using `VIX`, `SPY_Momentum_20`, and `SPY_Trend_Regime`.
+- Outcome: risk weight reacted to stress, but action ranking remained wrong. During `2022Q1-Q2`, high risk weights still selected `[0.70 SPY | 0.00 SH | 0.00 TLT]`.
+- Interpretation: detecting stress is not enough when the model does not learn which hedge asset remains effective; in 2022, `TLT` was not consistently defensive.
+- Decision: discontinue coefficient tuning for QR-DQN, remove it from the active pipeline, and move to dynamic cross-asset hedge representation.
+
+### Experiment - Dynamic Hedge-Graph DQN Pilot
+
+- Implementation status: pilot evaluated; do not promote this configuration to a full benchmark run.
+- Core design:
+  - Graph Transformer encoder models dynamic relationships among `SPY`, `SH`, and `TLT`.
+  - A no-lookahead hedge preference uses `VIX`, `SPY_Momentum_20`, `SPY_Trend_Regime`, and trailing `SPY-TLT` correlation.
+  - When stress is high and `SPY-TLT` correlation is positive, the policy downweights SPY/TLT-heavy exposure and prefers `SH` or cash.
+- Novelty motivation: explicitly model hedge breakdown rather than only raising generic risk aversion.
+- Pilot command:
+
+```powershell
+python main.py --mode research --skip-dqn --skip-ac --skip-sac --run-hedge-graph-dqn --hedge-graph-episodes 40 --results-dir results/hedge_graph_pilot
+```
+
+Files to record after the run:
+
+- `results/hedge_graph_pilot/hedge_graph_report.txt`
+- `results/hedge_graph_pilot/HEDGE_GRAPH_trade_log.csv`
+- `results/hedge_graph_pilot/run_config.txt`
+
+Pilot result:
+
+- Training budget: `40` episodes, run without DQN/AC/SAC.
+- Final net worth: `$8,615.10`.
+- Sharpe: `-0.8753`.
+- Sortino: `-1.3268`.
+- Max drawdown: `-22.34%`.
+- Average daily turnover: `5.23%`.
+- Average realized allocation: `68.32%`.
+- Average policy stress score: `0.6307`.
+- Average trailing SPY-TLT correlation signal: `-0.0737`.
+- What worked: policy diagnostics responded to stress and selected `SH`-heavy templates during `2022Q1-Q2`, which is behavior QR-DQN did not learn.
+- Failure mode:
+  - `2022Q1`: Sharpe `-1.504`, dominant template `[0.00 SPY | 0.70 SH | 0.00 TLT]`.
+  - `2022Q2`: Sharpe `-0.992`, dominant template `[0.00 SPY | 0.70 SH | 0.00 TLT]`.
+  - `2022Q3`: Sharpe `-5.038`, dominant template `[0.00 SPY | 0.40 SH | 0.30 TLT]`.
+- Interpretation: the model can rotate toward a hedge, but its hedge preference persists after the useful hedge period and keeps total exposure close to the `70%` cap. It needs an exit/recovery mechanism, not more training episodes in the same form.
+- Decision: do not run the exact version for `120` episodes. The active follow-up now adds explicit `Risk-On / Transition / Risk-Off` switching and lowers allocation preference during transition uncertainty.
+
+### Current Implementation - Three-State Dynamic Hedge-Graph DQN
+
+- Replaces the pilot's always-active hedge preference with three observable policy states:
+  - `Risk-On`: support controlled SPY/balanced exposure after recovery.
+  - `Risk-Off`: favor `SH`/cash and block concentrated SPY exposure only under strong stress.
+  - `Transition`: penalize fully allocated templates and prefer cash while regime signals disagree or recover.
+- Diagnostics written to trade logs: `Policy_Stress_Score`, `Policy_SPY_TLT_Correlation`, `Policy_Regime_State`.
+- Cleanup decision: QR-DQN source and raw folders are removed from active project artifacts because both fixed and regime-conditioned variants failed and their conclusions are preserved in this log.
+- Next pilot command:
+
+```powershell
+python main.py --mode research --skip-dqn --skip-ac --skip-sac --run-hedge-graph-dqn --hedge-graph-episodes 40 --results-dir results/hedge_graph_state_pilot
+```
+
+### Retained Result Folders For Reporting
+
+- `results/research`: DQN and PPO Actor-Critic benchmark reports.
+- `results/sac_v3`: retained plain Discrete SAC comparison result.
+- `results/hedge_graph_pilot`: negative pilot ablation showing that persistent hedge preference fails without transition/recovery switching.
+- Removed from raw results after documentation: `qrdqn_v1`, `qrdqn_regime_v1`, `smoke_qrdqn`, `smoke_sac`.
+
+### Experiment Result - Three-State Dynamic Hedge-Graph DQN Pilot
+
+- Result source: `results/hedge_graph_state_pilot/hedge_graph_report.txt`.
+- Training budget: `40` episodes, run without DQN/AC/SAC.
+- Final net worth: `$9,499.31`.
+- Sharpe: `-0.5462`.
+- Sortino: `-0.6059`.
+- Max drawdown: `-8.09%`.
+- Average daily turnover: `6.50%`.
+- Average realized allocation: `21.45%`.
+- Dominant portfolio template: cash `[0.00 SPY | 0.00 SH | 0.00 TLT]`, share `41.39%`.
+- Policy regime shares: `Risk-Off 47.50%`, `Transition 27.78%`, `Risk-On 24.72%`.
+- Improvement versus first Hedge-Graph pilot:
+  - Final net worth improved from `$8,615.10` to `$9,499.31`.
+  - Sharpe improved from `-0.8753` to `-0.5462`.
+  - Max drawdown improved from `-22.34%` to `-8.09%`.
+- Remaining failure mode: transition de-risking solved excessive exposure but created cash drag. The policy is now too defensive, particularly in `2021Q3-Q4` and `2022Q4`.
+- Decision: retain this pilot as evidence that three-state switching controls risk; do not run `120` episodes yet. Next version should reduce cash preference in `Risk-On` and permit limited balanced/SH exposure in `Transition` without returning to the original 70% overexposure.
+
+### Current Iteration - Balanced Transition Hedge-Graph DQN
+
+- Change after the three-state pilot:
+  - Preserve `Risk-Off` hedge behavior and thresholds because max drawdown improved materially.
+  - Reduce `Transition` cash preference and replace it with a diversified-allocation preference.
+  - Penalize transition templates whose total allocation exceeds `55%`.
+  - Use a Hedge-Graph-only environment cap of `50%` total asset allocation with `6%` maximum daily weight movement; the DQN baseline remains unchanged at its validated configuration.
+  - In `Risk-On`, reward balanced SPY/TLT participation and penalize remaining in cash, instead of favoring concentrated SPY exposure.
+- Intended effect: raise average allocation above the prior `21.45%` without returning to the original pilot's `68.32%` exposure or `-22.34%` drawdown.
+- Next pilot output folder: `results/hedge_graph_balanced_pilot`.
+
+### Experiment Result - Balanced Transition Hedge-Graph DQN Pilot
+
+- Result source: `results/hedge_graph_balanced_pilot/hedge_graph_report.txt`.
+- Training budget: `40` episodes.
+- Final net worth: `$9,304.58`.
+- Sharpe: `-0.6393`.
+- Sortino: `-1.0189`.
+- Max drawdown: `-10.47%`.
+- Average daily turnover: `5.16%`.
+- Average realized allocation: `48.04%`.
+- Dominant weight template: `[0.000 SPY | 0.286 SH | 0.214 TLT]`, share `35.83%`.
+- Outcome: cash drag was removed, but exposure became nearly fixed near the `50%` cap. The pilot is worse than the previous three-state pilot (`$9,499.31`, Sharpe `-0.5462`, drawdown `-8.09%`).
+- Failure diagnosis: the original discrete template library provides a jump from cash toward portfolios that are still too large once selected. A scoring adjustment alone cannot create moderate exposure actions.
+- Decision: do not tune preference strengths further on the same action set. Add a Hedge-Graph-only regime-specialized portfolio template library with explicit intermediate allocation levels.
+
+### Current Iteration - Regime-Specialized Template Hedge-Graph DQN
+
+- Architectural change: the Hedge-Graph agent now uses its own action library while DQN/AC/SAC baselines retain their original portfolio templates.
+- Hedge-Graph template range:
+  - cash,
+  - cautious/growth exposures between `30%` and `45%`,
+  - diversified transition exposures around `32% - 40%`,
+  - hedge exposures around `20% - 40%`.
+- Environment control: Hedge-Graph maximum allocation is capped at `45%` with `6%` maximum daily asset-weight movement.
+- Rationale: allow moderate state-specific positioning rather than forcing the policy to oscillate between cash and near-cap allocations.
+- Next pilot output folder: `results/hedge_graph_templates_pilot`.
+
+### Experiment Result - Regime-Specialized Template Hedge-Graph Pilot
+
+- Result source: `results/hedge_graph_templates_pilot/hedge_graph_report.txt`.
+- Training budget: `40` episodes.
+- Final net worth: `$9,614.15`.
+- Sharpe: `-0.4699`.
+- Sortino: `-0.6994`.
+- Max drawdown: `-6.58%`.
+- Average daily turnover: `2.03%`.
+- Average realized allocation: `32.05%`.
+- Dominant weight template: `[0.20 SPY | 0.00 SH | 0.10 TLT]`, share `54.17%`.
+- Assessment: best Hedge-Graph result to date in drawdown and Sharpe, validating moderate templates; it still remains below initial capital and below the positive baseline.
+- Failure diagnosis: additive regime prior is too weak relative to learned Q-ranking. In `Risk-Off`, the policy still selected the cautious growth template `[0.20 SPY | 0.00 SH | 0.10 TLT]` most often; `2022Q3` then produced Sharpe `-2.962`.
+- Decision: replace additive preference alone with a transparent regime action shield. The graph DQN will select freely only inside a state-appropriate template subset.
+- Methodological caution: these iterations use the current held-out period diagnostically. Final reported generalization claims require a fresh temporal holdout or walk-forward evaluation after architecture selection.
+
+### Current Iteration - Shielded Template Hedge-Graph DQN
+
+- Change: keep graph encoding and moderate templates, but apply a deterministic action shield after regime classification:
+  - `Risk-On`: permit growth/balanced templates where SPY exposure is not below SH exposure.
+  - `Transition`: permit only moderate, diversified templates with allocation no more than `40%`.
+  - `Risk-Off`: permit only hedge templates with near-zero SPY and meaningful SH exposure.
+- Rationale: the prior pilot showed that merely nudging Q-scores does not stop inappropriate growth selection during `Risk-Off`.
+- Next pilot output folder: `results/hedge_graph_shield_pilot`.
+
+### Experiment Result - Hard-Shield Hedge-Graph Pilot
+
+- Result source: `results/hedge_graph_shield_pilot/hedge_graph_report.txt`.
+- Training budget: `40` episodes.
+- Final net worth: `$9,379.79`.
+- Sharpe: `-0.7970`.
+- Sortino: `-1.1366`.
+- Max drawdown: `-8.07%`.
+- Average daily turnover: `5.00%`.
+- Average realized allocation: `32.57%`.
+- Dominant weight template: `[0.00 SPY | 0.32 SH | 0.08 TLT]`, share `23.06%`.
+- Outcome: hard shield reduced inappropriate Risk-Off growth selection in parts of 2022, but worsened the full-period Sharpe versus the regime-specialized template pilot (`$9,614.15`, Sharpe `-0.4699`).
+- Failure diagnosis: deterministic masking is too rigid. It prevents the Q-network from overriding the regime classifier when the classifier is only partially right, especially around recovery and mixed-signal quarters.
+- Decision: replace the hard mask with a soft regime shield. Invalid templates receive a finite Q-scale penalty instead of being assigned `-inf`, preserving explainable regime guidance while still allowing learned evidence to override it.
+
+### Experiment Result - Soft-Shield Hedge-Graph DQN, Penalty 3.0
+
+- Result source: `results/hedge_graph_soft_shield_pilot/hedge_graph_report.txt`.
+- Training budget: `40` episodes.
+- Penalty strength: `3.0`.
+- Final net worth: `$9,379.79`.
+- Sharpe: `-0.7970`.
+- Sortino: `-1.1366`.
+- Max drawdown: `-8.07%`.
+- Average daily turnover: `5.00%`.
+- Outcome: metrics and action distribution matched the hard-shield pilot almost exactly. The finite penalty was still large enough relative to Q-score dispersion to behave like a hard mask.
+- Decision: lower the default soft-shield penalty from `3.0` to `0.75` and rerun as a separate ablation instead of treating this as an improvement.
+
+### Current Iteration - Soft-Shield Hedge-Graph DQN, Penalty 0.75
+
+- Change: invalid regime templates now receive only `0.75 * std(Q)` penalty.
+- Rationale: preserve the best behavior of the regime-specialized template pilot while giving the regime shield a lighter veto against clearly incompatible templates.
+- Next pilot output folder: `results/hedge_graph_soft_shield_p075`.
+
+### Experiment Result - Soft-Shield Hedge-Graph DQN, Penalty 0.75
+
+- Result source: `results/hedge_graph_soft_shield_pilot/hedge_graph_report.txt` after rerun with `hedge_shield_penalty_strength: 0.75`.
+- Training budget: `40` episodes.
+- Final net worth: `$9,163.25`.
+- Sharpe: `-1.1871`.
+- Sortino: `-1.9183`.
+- Max drawdown: `-9.14%`.
+- Average daily turnover: `4.05%`.
+- Average realized allocation: `33.52%`.
+- Dominant weight template: `[0.00 SPY | 0.22 SH | 0.10 TLT]`, share `32.78%`.
+- Outcome: lowering the penalty did not recover the best template behavior; it pushed the agent toward hedge templates in the wrong windows and performed worse than both hard-shield and no-shield template pilots.
+- Decision: discontinue shield tuning for now. The active Hedge-Graph configuration reverts to regime-specialized templates plus additive regime prior with `hedge_use_regime_action_shield = False`.
+- Reporting note: keep the shield variants as negative ablations showing that transparent constraints must remain advisory; absolute or semi-absolute template vetoes overfit the diagnostic split.
+
+### Confirmation Run - No-Shield Hedge-Graph Active Config
+
+- Result source: `results/hedge_graph_no_shield_confirm/hedge_graph_report.txt`.
+- Training budget: `40` episodes.
+- Config check: `hedge_use_regime_action_shield = False`.
+- Final net worth: `$9,614.15`.
+- Sharpe: `-0.4699`.
+- Sortino: `-0.6994`.
+- Max drawdown: `-6.58%`.
+- Average daily turnover: `2.03%`.
+- Average realized allocation: `32.05%`.
+- Dominant weight template: `[0.20 SPY | 0.00 SH | 0.10 TLT]`, share `54.17%`.
+- Outcome: exactly reproduces the prior `hedge_graph_templates_pilot`, confirming that the active Hedge-Graph config has been restored to the best-known no-shield variant.
+- Next decision: stop shield tuning. The next meaningful experiment should test whether more training budget improves the restored no-shield graph agent, then move to a different novelty mechanism if it remains below the DQN/AC positive baselines.
+
+### Experiment Result - No-Shield Hedge-Graph 120 Episodes
+
+- Result source: `results/hedge_graph_no_shield_120/hedge_graph_report.txt`.
+- Training budget: `120` episodes.
+- Config check: `hedge_use_regime_action_shield = False`.
+- Final net worth: `$9,410.36`.
+- Sharpe: `-0.7999`.
+- Sortino: `-1.2576`.
+- Max drawdown: `-11.13%`.
+- Average daily turnover: `2.42%`.
+- Average realized allocation: `34.11%`.
+- Dominant weight template: `[0.20 SPY | 0.00 SH | 0.10 TLT]`, share `49.72%`.
+- Comparison versus 40-episode no-shield confirm:
+  - Final net worth decreased from `$9,614.15` to `$9,410.36`.
+  - Sharpe decreased from `-0.4699` to `-0.7999`.
+  - Max drawdown worsened from `-6.58%` to `-11.13%`.
+- Failure diagnosis: additional training did not discover a stronger hedge policy. It rotated returns across quarters rather than improving the full period: `2022Q4` improved, but `2021Q4` and `2022Q2` deteriorated sharply.
+- Decision: stop Hedge-Graph training-budget tuning. Retain the 40-episode no-shield template pilot as the best Hedge-Graph ablation, but do not promote it above the positive DQN/AC baselines.
+
+### Result Organization - Hedge-Graph Ablation Folder
+
+- Hedge-Graph result folders have been consolidated under `results/hedge_graph_ablation/raw_runs/`.
+- Index file: `results/hedge_graph_ablation/README.md`.
+- Original top-level Hedge-Graph paths in earlier notes refer to the run names before consolidation.
+- Purpose: keep raw evidence for the NCKH ablation table while reducing clutter in `results/`.
+
+### Experiment Result - Macro Regime v1 Dry Run
+
+- Result source: `results/macro_regime_v1`.
+- Config issue: `run_config.txt` shows `include_macro: False`, so this run did not actually include `US10Y`, `US2Y`, yield-curve, or `DXY` features.
+- DQN final net worth: `$10,715.79`.
+- DQN Sharpe: `0.6167`.
+- DQN Sortino: `0.9873`.
+- DQN max drawdown: `-7.14%`.
+- AC final net worth: `$9,013.62`.
+- AC Sharpe: `-0.7416`.
+- AC Sortino: `-1.0993`.
+- AC max drawdown: `-14.09%`.
+- Interpretation: this is a repeat of the current research configuration, not a valid macro ablation.
+- Code change after diagnosis: added `--mode macro_research`, which sets `include_macro=True` and defaults to `results/macro_regime_v1`.
+
+### Experiment Result - Macro Regime True v1
+
+- Result source: `results/macro_regime_true_v1`.
+- Config check: `include_macro: True`.
+- DQN final net worth: `$8,065.97`.
+- DQN Sharpe: `-1.3218`.
+- DQN Sortino: `-1.6986`.
+- DQN max drawdown: `-25.13%`.
+- DQN dominant template: `[0.70 SPY | 0.00 SH | 0.00 TLT]`, share `20.28%` by exact weights and `63.9%` by target-allocation label.
+- AC final net worth: `$9,173.23`.
+- AC Sharpe: `-0.7375`.
+- AC Sortino: `-1.1117`.
+- AC max drawdown: `-12.15%`.
+- Outcome: macro features helped AC final value slightly versus the research AC, but destroyed DQN by pushing it toward high SPY exposure through the 2022 bear market.
+- Failure diagnosis:
+  - Macro v1 included nonstationary macro level features (`Macro_*_Level`).
+  - DQN checkpoint selection did not penalize policy collapse into one dominant high-allocation template.
+- Code change for Macro v2:
+  - Macro features now exclude raw level columns and use change, 20-day momentum, z-score, yield-curve spread, spread z-score, and inversion flag.
+  - Macro mode adds a DQN concentration penalty for single-asset weights above `45%`.
+  - DQN validation checkpoint scoring now penalizes excessive dominant-action share.
+
+### Experiment Result - Macro Regime v2
+
+- Result source: `results/macro_regime_v2`.
+- Config check: `include_macro: True`, stationary macro features only, DQN concentration penalty enabled.
+- DQN final net worth: `$9,289.71`.
+- DQN Sharpe: `-0.4637`.
+- DQN Sortino: `-0.6641`.
+- DQN max drawdown: `-13.97%`.
+- DQN dominant template: `[0.45 SPY | 0.00 SH | 0.25 TLT]`, share `13.89%` by exact weights, but `TARGET 70%` still appears in `43.6%` of test steps.
+- AC final net worth: `$9,802.47`.
+- AC Sharpe: `-0.1446`.
+- AC Sortino: `-0.2030`.
+- AC max drawdown: `-6.63%`.
+- AC dominant template: `[0.390 SPY | 0.122 SH | 0.087 TLT]`, share `33.61%`.
+- Outcome:
+  - DQN improved materially versus Macro True v1 but remains below the non-macro DQN baseline and below initial capital.
+  - AC improved strongly versus Macro True v1 and current research AC, nearly reaching breakeven with controlled drawdown.
+- Failure diagnosis:
+  - Macro features should not replace the verified DQN baseline; DQN still becomes too long-biased in 2022Q2-Q3.
+  - AC benefits from macro/state regularization but remains exposed during `2022Q2`.
+- Decision: treat macro as an AC-focused ablation for now. Next step is a mild macro/regime defensive overlay for AC, not another broad DQN macro tuning pass.
+
+### Current Iteration - Macro Regime v3
+
+- Change: add a non-scaled `Macro_Risk_Off_Raw` helper signal derived from rising 10Y yield momentum, rising DXY momentum, yield-curve inversion, and adverse yield-spread z-score.
+- Change: add an AC-only `ac_macro_hedge_weight` overlay. When macro risk is elevated, the multi-asset environment blends the AC target portfolio slightly toward an `SH/TLT` defensive mix.
+- Default macro-mode overlay strength: `0.35`.
+- Rationale: Macro v2 shows direct macro features help AC but still leave it exposed in `2022Q2`; a mild no-lookahead macro defensive overlay is more interpretable than asking the neural policy to infer all macro hedging behavior from noisy features.
+- Next run should use `results/macro_regime_v3`.
+
+### Experiment Result - Macro Regime v3
+
+- Result source: `results/macro_regime_v3`.
+- Config check: `include_macro: True`, `ac_macro_hedge_weight: 0.35`.
+- DQN final net worth: `$9,289.71`.
+- DQN Sharpe: `-0.4637`.
+- DQN Sortino: `-0.6641`.
+- DQN max drawdown: `-13.97%`.
+- AC final net worth: `$9,686.69`.
+- AC Sharpe: `-0.2694`.
+- AC Sortino: `-0.3911`.
+- AC max drawdown: `-7.13%`.
+- Outcome: DQN stayed identical to Macro v2 as expected, but AC worsened versus Macro v2 (`$9,802.47`, Sharpe `-0.1446`).
+- Failure diagnosis: the macro hedge overlay increased AC realized allocation from `40.56%` to `47.97%` and worsened `2022Q2` Sharpe from `-1.907` to `-2.558`. The defensive mix was not actually defensive enough during a period when both equity and duration risk were problematic.
+- Decision: discontinue the macro hedge overlay. Macro v2 remains the best macro AC ablation. Next macro run should use stationary macro features with stricter AC allocation control rather than an explicit SH/TLT overlay.
+
+### Current Iteration - Macro Regime v4
+
+- Change: disable `ac_macro_hedge_weight`.
+- Change: reduce macro-mode AC maximum total allocation from `0.60` to `0.50`.
+- Change: raise macro-mode AC cash logit bias from `0.90` to `1.05`.
+- Rationale: Macro v2 is near breakeven but loses too much in `2022Q2`; reducing total allocation is a cleaner risk-control intervention than forcing a fixed hedge basket.
+- Next run should use `results/macro_regime_v4`.
+
+### Experiment Result - Macro Regime v4
+
+- Result source: `results/macro_regime_v4`.
+- Config check: `include_macro: True`, `ac_max_total_allocation: 0.50`, `ac_cash_logit_bias: 1.05`, `ac_macro_hedge_weight: 0.0`.
+- DQN final net worth: `$9,289.71`.
+- DQN Sharpe: `-0.4637`.
+- DQN Sortino: `-0.6641`.
+- DQN max drawdown: `-13.97%`.
+- AC final net worth: `$9,600.25`.
+- AC Sharpe: `-0.3971`.
+- AC Sortino: `-0.5083`.
+- AC max drawdown: `-6.87%`.
+- Outcome: DQN stayed unchanged and AC worsened versus Macro v2 and Macro v3.
+- Failure diagnosis: reducing AC allocation from `40.56%` in Macro v2 to `33.22%` in Macro v4 reduced risk but also removed too much recovery participation. `2022Q2` remained weak, so the lower cap did not solve the main failure mode.
+- Decision: Macro v2 remains the best macro ablation. Stop macro allocation/overlay tuning unless a new macro signal design is introduced.
+
+### Result Organization - Macro Regime Ablation Folder
+
+- Macro regime result folders are consolidated under `results/macro_regime_ablation/raw_runs/`.
+- Index file: `results/macro_regime_ablation/README.md`.
+- Future macro tests should overwrite a stable folder such as `results/macro_regime_current`; important metrics should be copied into this log and the ablation README instead of creating many top-level result folders.
+
+### Current Iteration - Offline Expert Ensemble
+
+- Implementation: `training/ensemble.py` and `scripts/run_ensemble.py`.
+- Stable output folder: `results/ensemble_current`.
+- Initial hypothesis: regime-gated switching among prior expert policies may improve risk-adjusted performance.
+- Important correction: return-splicing between expert trade logs looked strong but was invalid because it ignored the real turnover created when switching experts. The implemented evaluator recomputes PnL from selected expert weights and asset prices, including turnover cost.
+- Tested strategy retained as default: fixed `50% AC_BASE + 50% DQN_BASE` target-weight blend.
+- Result source: `results/ensemble_current/ensemble_report.txt`.
+- Final net worth: `$10,735.69`.
+- Sharpe: `0.6953`.
+- Sortino: `1.0667`.
+- Max drawdown: `-5.46%`.
+- Average daily turnover: `8.45%`.
+- Average realized allocation: `60.95%`.
+- Interpretation:
+  - Improves Sharpe versus DQN baseline (`0.4856`) and AC baseline (`0.5523`).
+  - Improves Sortino versus both individual baselines.
+  - Keeps drawdown close to DQN baseline while preserving most of AC's final value.
+- Research role: strongest current risk-adjusted result and a clean non-FinRL novelty candidate as a cost-aware multi-expert portfolio ensemble.
+
+### Experiment Result - Ensemble Blend Ratio Ablation
+
+- Result source: `results/ensemble_ablation/README.md`.
+- Evaluation method: recompute PnL from blended expert weights and asset prices with turnover cost.
+- Tested AC/DQN blend weights:
+  - `25/75`: final `$10,637.67`; Sharpe `0.6286`; Sortino `0.9768`; max drawdown `-4.81%`.
+  - `40/60`: final `$10,699.04`; Sharpe `0.6815`; Sortino `1.0405`; max drawdown `-5.09%`.
+  - `50/50`: final `$10,735.69`; Sharpe `0.6953`; Sortino `1.0667`; max drawdown `-5.46%`.
+  - `60/40`: final `$10,763.64`; Sharpe `0.6891`; Sortino `1.0752`; max drawdown `-6.14%`.
+  - `75/25`: final `$10,775.54`; Sharpe `0.6423`; Sortino `1.0253`; max drawdown `-7.32%`.
+- Decision: keep `50/50` as the selected proposed method because it maximizes Sharpe while retaining DQN-like drawdown control.
+- Alternative note: `60/40` can be reported as a return/Sortino-seeking variant, but it has noticeably larger drawdown.
+
+### Research Summary - Bootstrap Confidence Intervals
+
+- Implementation: `training/research_summary.py` and `scripts/run_research_summary.py`.
+- Result source: `results/research_summary/metrics_summary.md`.
+- Method: moving-block bootstrap with 20-trading-day blocks and 1,000 resamples.
+- Ranking by point-estimate Sharpe:
+  - Ensemble 50/50: final `$10,735.76`; Sharpe `0.6953`; Sortino `1.0667`; max drawdown `-5.46%`.
+  - AC Baseline: final `$10,780.55`; Sharpe `0.5523`; Sortino `0.8930`; max drawdown `-9.48%`.
+  - DQN Baseline: final `$10,526.35`; Sharpe `0.4856`; Sortino `0.7717`; max drawdown `-5.50%`.
+  - SAC: final `$10,363.83`; Sharpe `0.2646`; Sortino `0.3894`; max drawdown `-12.08%`.
+  - Macro AC v2: final `$9,802.47`; Sharpe `-0.1448`; Sortino `-0.2036`; max drawdown `-6.63%`.
+  - HedgeGraph Best: final `$9,614.15`; Sharpe `-0.4699`; Sortino `-0.6994`; max drawdown `-6.58%`.
+- Interpretation: the ensemble has the best risk-adjusted point estimates, but bootstrap intervals are wide because the test period is short and regime-concentrated. This should be reported honestly and motivates walk-forward validation as the next robustness check.
+
+### Experiment Result - Adaptive Friction-Aware Ensemble
+
+- Implementation: `training/ensemble.py`, `scripts/run_ensemble.py`, and `scripts/run_ensemble_friction_sweep.py`.
+- Strategy tested: `adaptive_blend`.
+- Method: dynamically blend AC and DQN weights using prior rolling Sharpe, drawdown, and turnover scores; clamp AC weight to `[0.25, 0.75]`.
+- Friction rule: transaction cost cannot be below `0.001`.
+- Result source: `results/ensemble_ablation/raw_runs/adaptive_blend/ensemble_report.txt`.
+- Transaction cost `0.001` result: final `$10,466.74`; Sharpe `0.4498`; Sortino `0.7276`; max drawdown `-6.52%`; turnover `10.29%`.
+- Friction sweep source: `results/ensemble_friction_sweep/friction_sweep.md`.
+- Friction sweep:
+  - cost `0.0010`: final `$10,466.74`; Sharpe `0.4498`; Sortino `0.7276`; max drawdown `-6.52%`.
+  - cost `0.0015`: final `$10,307.61`; Sharpe `0.3109`; Sortino `0.5035`; max drawdown `-6.74%`.
+  - cost `0.0020`: final `$10,149.81`; Sharpe `0.1722`; Sortino `0.2790`; max drawdown `-6.95%`.
+- Acceptance result: failed to beat the selected 50/50 blend (`$10,735.69`, Sharpe `0.6953`, max drawdown `-5.46%`) and slightly breached the `-6.5%` drawdown target.
+- Decision: keep `results/ensemble_current` as the fixed 50/50 blend. Retain adaptive blend as a neutral/negative ablation showing that dynamic switching must overcome transaction-cost-induced turnover.
+
 ## Current Winning Baseline
 
 - DQN final net worth: $10,526.35
@@ -301,3 +796,15 @@ Status:
 - Change actions to target allocations: DQN = cash / 50% long / 100% long; AC = continuous 0-100% target long allocation.
 - Use log-return reward with drawdown, turnover, and mild idle-cash penalties.
 - Add trade-count and Buy & Hold metrics to reports.
+
+## Options-Sentiment Pipeline Extension
+
+- Added daily options-derived features from local raw files in `data/external`.
+- Sources used now:
+  - `spy_eod_total.csv`: SPY put/call volume, IV skew, ATM put/call ratio, and a local SPY price cache.
+  - `TLT_data.csv`, `HYG_data.csv`, `LQD_data.csv`, `EMB_data.csv`: bond/credit ETF put-call, short-interest, and bid-ask stress features.
+- Output feature file: `data/external/options_features_daily.csv`.
+- New mode: `python main.py --mode options_research`.
+- `options_research` currently uses `SPY` and `TLT` only, matching the decision not to force SH options data into this branch.
+- Implementation note: Yahoo Finance is still used when available, but the pipeline can fall back to local SPY/TLT prices and realized-volatility VIX proxy if Yahoo returns empty data.
+- Smoke check passed with `SPY + TLT`, 78 total state features, 42 options features, and no shape break in DQN/AC training/evaluation.

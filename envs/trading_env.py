@@ -19,11 +19,16 @@ class TradingEnv(gym.Env):
         ac_temperature=1.35,
         ac_mix_power=1.0,
         concentration_penalty_coef=0.0,
+        downside_penalty_coef=0.10,
+        turnover_penalty_coef=0.0050,
+        drawdown_penalty_coef=0.0030,
         reward_mode="heuristic",
         risk_aversion=3.0,
         cvar_alpha=0.95,
         tail_risk_coef=0.25,
         tail_window=60,
+        target_portfolio_vol=None,
+        vol_window=20,
     ):
         super(TradingEnv, self).__init__()
 
@@ -265,11 +270,24 @@ class MultiAssetTradingEnv(gym.Env):
         ac_temperature=1.35,
         ac_mix_power=1.0,
         concentration_penalty_coef=0.0,
+        downside_penalty_coef=0.10,
+        turnover_penalty_coef=0.0050,
+        drawdown_penalty_coef=0.0030,
         reward_mode="heuristic",
         risk_aversion=3.0,
         cvar_alpha=0.95,
         tail_risk_coef=0.25,
         tail_window=60,
+        target_portfolio_vol=None,
+        vol_window=20,
+        sharpe_window=60,
+        sortino_weight=0.50,
+        sharpe_reward_scale=0.08,
+        return_reward_weight=0.35,
+        regime_hedge_weight=0.0,
+        macro_hedge_weight=0.0,
+        regime_ma_window=80,
+        portfolio_templates=None,
     ):
         super(MultiAssetTradingEnv, self).__init__()
 
@@ -287,11 +305,24 @@ class MultiAssetTradingEnv(gym.Env):
         self.ac_temperature = ac_temperature
         self.ac_mix_power = ac_mix_power
         self.concentration_penalty_coef = concentration_penalty_coef
+        self.downside_penalty_coef = downside_penalty_coef
+        self.turnover_penalty_coef = turnover_penalty_coef
+        self.drawdown_penalty_coef = drawdown_penalty_coef
         self.reward_mode = reward_mode
         self.risk_aversion = risk_aversion
         self.cvar_alpha = cvar_alpha
         self.tail_risk_coef = tail_risk_coef
         self.tail_window = tail_window
+        self.target_portfolio_vol = target_portfolio_vol
+        self.vol_window = vol_window
+        self.sharpe_window = sharpe_window
+        self.sortino_weight = sortino_weight
+        self.sharpe_reward_scale = sharpe_reward_scale
+        self.return_reward_weight = return_reward_weight
+        self.regime_hedge_weight = regime_hedge_weight
+        self.macro_hedge_weight = macro_hedge_weight
+        self.regime_ma_window = regime_ma_window
+        self.portfolio_templates = portfolio_templates
 
         if not self.feature_cols or not self.asset_cols:
             raise ValueError("MultiAssetTradingEnv requires feature_cols and asset_cols attrs.")
@@ -309,6 +340,14 @@ class MultiAssetTradingEnv(gym.Env):
         self.reset()
 
     def _build_portfolios(self):
+        if self.portfolio_templates is not None:
+            portfolios = [np.asarray(weights, dtype=np.float32) for weights in self.portfolio_templates]
+            if any(weights.shape != (self.n_assets,) for weights in portfolios):
+                raise ValueError("Each portfolio template must match the number of assets.")
+            if not np.allclose(portfolios[0], np.zeros(self.n_assets)):
+                raise ValueError("The first portfolio template must represent cash.")
+            return portfolios
+
         portfolios = []
         portfolios.append(np.zeros(self.n_assets))  # cash
         for i in range(self.n_assets):
@@ -366,7 +405,64 @@ class MultiAssetTradingEnv(gym.Env):
         total = float(np.sum(weights))
         if total > self.max_total_allocation:
             weights = weights / total * self.max_total_allocation #
+        weights = self._apply_regime_hedge(weights)
+        weights = self._apply_portfolio_vol_target(weights)
         return weights.astype(np.float32)
+
+    def _apply_regime_hedge(self, weights):
+        if (self.regime_hedge_weight <= 0.0 and self.macro_hedge_weight <= 0.0) or self.n_assets < 3:
+            return weights
+
+        hedge = np.zeros_like(weights)
+        hedge[1] = min(0.35, self.max_total_allocation * 0.58)
+        hedge[2] = min(0.25, self.max_total_allocation * 0.42)
+
+        blend = 0.0
+        if self.regime_hedge_weight > 0.0 and "Close_SPY" in self.df.columns:
+            signal_idx = self.current_step - 1
+            start = max(0, signal_idx - self.regime_ma_window + 1)
+            close = self.df["Close_SPY"].iloc[start : signal_idx + 1].astype(float)
+            if len(close) >= max(20, self.regime_ma_window // 2):
+                price = float(close.iloc[-1])
+                ma = float(close.mean())
+                momentum_20 = price / float(close.iloc[max(0, len(close) - 21)]) - 1.0 if len(close) > 20 else 0.0
+                if price < ma and momentum_20 < 0.0:
+                    blend = max(blend, self.regime_hedge_weight)
+
+        if self.macro_hedge_weight > 0.0 and "Macro_Risk_Off_Raw" in self.df.columns:
+            macro_risk = float(self.df["Macro_Risk_Off_Raw"].iloc[self.current_step])
+            if np.isfinite(macro_risk) and macro_risk >= 0.50:
+                blend = max(blend, self.macro_hedge_weight * macro_risk)
+
+        if blend <= 0.0:
+            return weights
+
+        blend = min(max(blend, 0.0), 1.0)
+        mixed = (1.0 - blend) * weights + blend * hedge
+        total = float(np.sum(mixed))
+        if total > self.max_total_allocation:
+            mixed = mixed / total * self.max_total_allocation
+        return mixed
+
+    def _apply_portfolio_vol_target(self, weights):
+        if self.target_portfolio_vol is None:
+            return weights
+        start = max(0, self.current_step - self.vol_window)
+        if self.current_step - start < max(5, min(self.vol_window, 10)):
+            return weights
+
+        prices = self.df[self.asset_cols].iloc[start : self.current_step].astype(float)
+        returns = prices.pct_change().dropna()
+        if len(returns) < 5:
+            return weights
+
+        cov = returns.cov().values
+        port_var = float(weights @ cov @ weights.T)
+        if not np.isfinite(port_var) or port_var <= 1e-10:
+            return weights
+        port_vol = np.sqrt(port_var)
+        scale = min(1.0, float(self.target_portfolio_vol) / (port_vol + 1e-8))
+        return weights * scale
 
     def _smooth_target_weights(self, target_weights):
         delta = np.clip(target_weights - self.weights, -self.max_weight_delta, self.max_weight_delta) #
@@ -391,10 +487,32 @@ class MultiAssetTradingEnv(gym.Env):
         clipped_return = float(np.clip(portfolio_return, -0.20, 0.20))
         utility_gain = (1.0 - np.exp(-gamma * clipped_return)) / gamma
         tail_penalty = self.tail_risk_coef * self._tail_risk_penalty()
-        turnover_penalty = 0.0040 * turnover
+        turnover_penalty = self.turnover_penalty_coef * turnover
         concentration_penalty = self.concentration_penalty_coef * max(max_asset_weight - 0.45, 0.0)
-        drawdown_penalty = 0.0015 * drawdown
+        drawdown_penalty = self.drawdown_penalty_coef * drawdown
         return utility_gain - tail_penalty - turnover_penalty - drawdown_penalty - concentration_penalty
+
+    def _rolling_sharpe_sortino_reward(self, portfolio_return, turnover, drawdown, max_asset_weight):
+        recent = np.asarray(self.return_history[-self.sharpe_window :], dtype=np.float64)
+        if len(recent) < max(10, self.sharpe_window // 4):
+            risk_score = 0.0
+        else:
+            mean_return = float(np.mean(recent))
+            vol = float(np.std(recent) + 1e-8)
+            downside = recent[recent < 0.0]
+            downside_vol = float(np.std(downside) + 1e-8) if len(downside) else vol
+            sharpe = np.sqrt(252.0) * mean_return / vol
+            sortino = np.sqrt(252.0) * mean_return / downside_vol
+            risk_score = float(np.clip(sharpe + self.sortino_weight * sortino, -5.0, 5.0))
+
+        concentration_penalty = self.concentration_penalty_coef * max(max_asset_weight - 0.45, 0.0)
+        penalty = (
+            self.turnover_penalty_coef * turnover
+            + self.drawdown_penalty_coef * drawdown
+            + self.downside_penalty_coef * abs(min(portfolio_return, 0.0))
+            + concentration_penalty
+        ) * 100.0
+        return self.return_reward_weight * portfolio_return * 100.0 + self.sharpe_reward_scale * risk_score - penalty
 
     def step(self, action):
         prev_net_worth = self.net_worth
@@ -423,10 +541,12 @@ class MultiAssetTradingEnv(gym.Env):
         self.return_history.append(portfolio_return)
         if self.reward_mode == "utility_cvar":
             reward = self._utility_reward(portfolio_return, turnover, drawdown, max_asset_weight) * 100.0
+        elif self.reward_mode == "sharpe_sortino":
+            reward = self._rolling_sharpe_sortino_reward(portfolio_return, turnover, drawdown, max_asset_weight)
         else:
-            downside_penalty = 0.10 * abs(min(portfolio_return, 0.0))
-            turnover_penalty = 0.0050 * turnover
-            drawdown_penalty = 0.0030 * drawdown
+            downside_penalty = self.downside_penalty_coef * abs(min(portfolio_return, 0.0))
+            turnover_penalty = self.turnover_penalty_coef * turnover
+            drawdown_penalty = self.drawdown_penalty_coef * drawdown
             concentration_penalty = self.concentration_penalty_coef * max(max_asset_weight - 0.45, 0.0) #
             reward = (
                 log_return

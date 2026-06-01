@@ -1,4 +1,5 @@
 import os
+from dataclasses import asdict, is_dataclass
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -44,7 +45,25 @@ def evaluate_policy(env, agent, is_dqn=True):
     max_drawdown = float(np.min(equity / np.maximum.accumulate(equity) - 1.0))
     action_changes = sum(1 for i in range(1, len(actions_taken)) if actions_taken[i] != actions_taken[i - 1])
     unique_actions = len(set(actions_taken))
-    return net_worth, sharpe, sortino, max_drawdown, avg_turnover, trade_count, action_changes, unique_actions
+    dominant_action = None
+    dominant_action_share = 0.0
+    if actions_taken:
+        values, counts = np.unique(np.asarray(actions_taken, dtype=object), return_counts=True)
+        top_idx = int(np.argmax(counts))
+        dominant_action = values[top_idx]
+        dominant_action_share = float(counts[top_idx] / len(actions_taken))
+    return (
+        net_worth,
+        sharpe,
+        sortino,
+        max_drawdown,
+        avg_turnover,
+        trade_count,
+        action_changes,
+        unique_actions,
+        dominant_action,
+        dominant_action_share,
+    )
 
 
 def evaluate_validation_bundle(val_envs, agent, is_dqn=True):
@@ -61,6 +80,8 @@ def evaluate_validation_bundle(val_envs, agent, is_dqn=True):
         int(round(np.mean([m[5] for m in metrics]))),
         int(round(np.mean([m[6] for m in metrics]))),
         int(min(m[7] for m in metrics)),
+        None,
+        float(np.mean([m[9] for m in metrics])),
     )
 
 
@@ -79,6 +100,12 @@ def evaluate_and_log_trades(env, agent, test_df, model_name, results_dir, is_dqn
     while not done:
         date = test_df.index[env.current_step] if isinstance(test_df.index, pd.DatetimeIndex) else env.current_step
         prices = {col: test_df[col].iloc[env.current_step] for col in env.asset_cols}
+        policy_risk_weight = (
+            agent.risk_weight_for_state(state)
+            if hasattr(agent, "risk_weight_for_state")
+            else ""
+        )
+        policy_diagnostics = agent.diagnostics_for_state(state) if hasattr(agent, "diagnostics_for_state") else {}
 
         if is_dqn:
             action = agent.act(state)
@@ -92,8 +119,7 @@ def evaluate_and_log_trades(env, agent, test_df, model_name, results_dir, is_dqn
             if target_weights is not None
             else ""
         )
-        trade_log.append(
-            {
+        trade_row = {
                 "Step": step,
                 "Date": date,
                 "Close_Price": ", ".join(f"{k}: {v}" for k, v in prices.items()),
@@ -106,8 +132,10 @@ def evaluate_and_log_trades(env, agent, test_df, model_name, results_dir, is_dqn
                 "Reward": reward,
                 "Weights": target_repr,
                 "Cash_Weight": info.get("cash_weight", ""),
+                "Policy_Risk_Weight": policy_risk_weight,
             }
-        )
+        trade_row.update(policy_diagnostics)
+        trade_log.append(trade_row)
         net_worths.append(info["net_worth"])
         portfolio_returns.append(info["portfolio_return"])
         state = next_state
@@ -131,8 +159,13 @@ def buy_and_hold_curve(test_df, initial_balance, window_size):
     return [initial_balance] + curve[1:]
 
 
-def plot_deep_learning_metrics(dqn_hist, ac_hist, results_dir):
-    fig, axs = plt.subplots(2, 2, figsize=(15, 10))
+def plot_deep_learning_metrics(dqn_hist, ac_hist, results_dir, sac_history=None, hedge_graph_history=None):
+    extra_histories = []
+    if sac_history is not None:
+        extra_histories.append(("Discrete SAC", sac_history, "green", "brown"))
+    if hedge_graph_history is not None:
+        extra_histories.append(("Hedge-Graph DQN", hedge_graph_history, "darkgreen", "darkred"))
+    fig, axs = plt.subplots(2 + len(extra_histories), 2, figsize=(15, 10 + 3 * len(extra_histories)))
     fig.suptitle("Deep Learning Training Metrics", fontsize=16)
     axs[0, 0].plot(dqn_hist.get("rewards", []), color="blue")
     axs[0, 0].set_title("DQN Episode Rewards")
@@ -142,6 +175,11 @@ def plot_deep_learning_metrics(dqn_hist, ac_hist, results_dir):
     axs[1, 0].set_title("Actor-Critic Episode Rewards")
     axs[1, 1].plot(ac_hist.get("loss", []), color="purple")
     axs[1, 1].set_title("Actor-Critic Training Loss")
+    for row, (label, history, reward_color, loss_color) in enumerate(extra_histories, start=2):
+        axs[row, 0].plot(history.get("rewards", []), color=reward_color)
+        axs[row, 0].set_title(f"{label} Episode Rewards")
+        axs[row, 1].plot(history.get("loss", []), color=loss_color)
+        axs[row, 1].set_title(f"{label} Training Loss")
     for ax in axs.flat:
         ax.grid(True, alpha=0.3)
         ax.set_xlabel("Episodes")
@@ -150,13 +188,34 @@ def plot_deep_learning_metrics(dqn_hist, ac_hist, results_dir):
     plt.close()
 
 
-def plot_equity_curves(dqn_net_worths, ac_net_worths, buy_hold_net_worths, dqn_sharpe, ac_sharpe, results_dir):
+def plot_equity_curves(
+    dqn_net_worths,
+    ac_net_worths,
+    buy_hold_net_worths,
+    dqn_sharpe,
+    ac_sharpe,
+    results_dir,
+    sac_net_worths=None,
+    sac_sharpe=0.0,
+    hedge_graph_net_worths=None,
+    hedge_graph_sharpe=0.0,
+):
     plt.figure(figsize=(14, 7))
     if dqn_net_worths:
         plt.plot(dqn_net_worths, label=f"DQN Agent (Sharpe: {dqn_sharpe:.2f})", color="blue")
     if ac_net_worths:
         plt.plot(ac_net_worths, label=f"Actor-Critic Agent (Sharpe: {ac_sharpe:.2f})", color="orange")
-    plt.plot(buy_hold_net_worths[: max(len(dqn_net_worths), len(ac_net_worths))], label="Buy & Hold", color="gray", linestyle="--")
+    if sac_net_worths:
+        plt.plot(sac_net_worths, label=f"Discrete SAC Agent (Sharpe: {sac_sharpe:.2f})", color="green")
+    if hedge_graph_net_worths:
+        plt.plot(hedge_graph_net_worths, label=f"Hedge-Graph DQN Agent (Sharpe: {hedge_graph_sharpe:.2f})", color="darkgreen")
+    max_len = max(
+        len(dqn_net_worths),
+        len(ac_net_worths),
+        len(sac_net_worths or []),
+        len(hedge_graph_net_worths or []),
+    )
+    plt.plot(buy_hold_net_worths[:max_len], label="Buy & Hold", color="gray", linestyle="--")
     plt.title("Backtesting Performance", fontsize=14)
     plt.xlabel("Trading Days")
     plt.ylabel("Portfolio Value ($)")
@@ -179,3 +238,25 @@ def write_report(path, title, env, final_net_worth, sharpe, buy_hold_final, mean
         f.write(f"Average Daily Turnover: {metrics['avg_turnover']:.2%}\n")
         f.write(f"Average Realized Allocation: {metrics['avg_allocation']:.2%}\n")
         f.write(f"Meaningful Trades: {meaningful_trades}\n")
+        if metrics.get("dominant_weight"):
+            f.write(f"Dominant Weight Template: {metrics['dominant_weight']}\n")
+            f.write(f"Dominant Template Share: {metrics['dominant_weight_share']:.2%}\n")
+            f.write(f"Weight Template Changes: {metrics['action_changes']}\n")
+        if metrics.get("avg_policy_risk_weight") is not None:
+            f.write(f"Average Policy Risk Weight: {metrics['avg_policy_risk_weight']:.4f}\n")
+        if metrics.get("avg_policy_stress_score") is not None:
+            f.write(f"Average Policy Stress Score: {metrics['avg_policy_stress_score']:.4f}\n")
+        if metrics.get("avg_spy_tlt_correlation") is not None:
+            f.write(f"Average SPY-TLT Correlation Signal: {metrics['avg_spy_tlt_correlation']:.4f}\n")
+        if metrics.get("policy_regime_shares"):
+            shares = ", ".join(f"{name}: {share:.2f}%" for name, share in metrics["policy_regime_shares"].items())
+            f.write(f"Policy Regime Shares: {shares}\n")
+
+
+def write_run_metadata(path, cfg):
+    data = asdict(cfg) if is_dataclass(cfg) else dict(cfg)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("RUN CONFIG\n")
+        f.write("-" * 40 + "\n")
+        for key, value in data.items():
+            f.write(f"{key}: {value}\n")
