@@ -146,7 +146,7 @@ def _read_local_price_file(path):
             df = pd.read_csv(path, skiprows=[1]).rename(columns={"Price": "Date"})
         if "Date" not in df.columns:
             return pd.DataFrame()
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df["Date"] = pd.to_datetime(df["Date"], format="%Y-%m-%d", errors="coerce")
 
     df = df.dropna(subset=["Date"]).set_index("Date")
     return _normalize_ohlcv(df)
@@ -278,7 +278,19 @@ def load_sentiment_features(sentiment_path):
     return sentiment[feature_cols], feature_cols
 
 
-def load_options_features(options_path):
+COMPACT_OPTIONS_FEATURES = [
+    "Options_RiskOffScore",
+    "Options_RiskOff_High",
+    "Options_SPY_PutCallRatio_Z20",
+    "Options_SPY_ATM_PutCallRatio_Z20",
+    "Options_SPY_IVSkew_Z20",
+    "Options_CreditStress_PutCall_Z20",
+    "Options_BondStress_Z20",
+    "Options_TLT_PutCallRatio_Z20",
+]
+
+
+def load_options_features(options_path, feature_mode="all"):
     """Load precomputed daily options-derived features."""
     if not options_path:
         return pd.DataFrame(), []
@@ -293,13 +305,20 @@ def load_options_features(options_path):
 
     options[date_col] = pd.to_datetime(options[date_col])
     options = options.set_index(date_col).sort_index()
-    feature_cols = [
+    all_feature_cols = [
         col for col in options.columns
-        if col.startswith("Options_") and pd.api.types.is_numeric_dtype(options[col])
+        if col.startswith("Options_")
+        and col != "Options_RiskOff_Raw"
+        and pd.api.types.is_numeric_dtype(options[col])
     ]
+    if feature_mode == "compact":
+        feature_cols = [col for col in COMPACT_OPTIONS_FEATURES if col in all_feature_cols]
+    else:
+        feature_cols = all_feature_cols
     if not feature_cols:
         return pd.DataFrame(), []
-    return options[feature_cols], feature_cols
+    helper_cols = [col for col in ["Options_RiskOff_Raw"] if col in options.columns]
+    return options[feature_cols + helper_cols], feature_cols
 
 
 def _join_external_features(df, external_df, feature_cols):
@@ -315,6 +334,7 @@ def load_and_preprocess_data(
     include_macro=True,
     sentiment_path=None,
     options_path=None,
+    options_feature_mode="all",
 ):
     print(f"Downloading data for {ticker} and ^VIX from Yahoo Finance...")
 
@@ -345,7 +365,7 @@ def load_and_preprocess_data(
     sentiment_df, sentiment_cols = load_sentiment_features(sentiment_path)
     if not sentiment_df.empty:
         df = df.join(sentiment_df, how="left").ffill()
-    options_df, options_cols = load_options_features(options_path)
+    options_df, options_cols = load_options_features(options_path, options_feature_mode)
     if not options_df.empty:
         df = _join_external_features(df, options_df, options_cols)
     df.dropna(inplace=True)
@@ -381,6 +401,7 @@ def load_multi_asset_data(
     include_macro=True,
     sentiment_path=None,
     options_path=None,
+    options_feature_mode="all",
 ):
     if tickers is None:
         tickers = ["SPY", "SH", "TLT"]
@@ -403,7 +424,7 @@ def load_multi_asset_data(
     close_cols = []
     macro_df, macro_cols = (load_macro_features(start, end) if include_macro else (pd.DataFrame(), []))
     sentiment_df, sentiment_cols = load_sentiment_features(sentiment_path)
-    options_df, options_cols = load_options_features(options_path)
+    options_df, options_cols = load_options_features(options_path, options_feature_mode)
 
     for ticker in tickers:
         raw = _download_or_load_price_data(ticker, start, end)

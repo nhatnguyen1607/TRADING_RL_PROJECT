@@ -808,3 +808,151 @@ Status:
 - `options_research` currently uses `SPY` and `TLT` only, matching the decision not to force SH options data into this branch.
 - Implementation note: Yahoo Finance is still used when available, but the pipeline can fall back to local SPY/TLT prices and realized-volatility VIX proxy if Yahoo returns empty data.
 - Smoke check passed with `SPY + TLT`, 78 total state features, 42 options features, and no shape break in DQN/AC training/evaluation.
+
+## Latest Options Research Result
+
+- Command family: `python main.py --mode options_research --skip-sac --results-dir results/options_current`.
+- Universe: `SPY + TLT`; SH was intentionally removed from this branch.
+- DQN final net worth: $9,255.93, Sharpe: -1.8474, Sortino: -1.8852, max drawdown: -8.09%, average turnover: 6.89%.
+- AC final net worth: $9,432.00, Sharpe: -1.0550, Sortino: -0.6395, max drawdown: -6.36%, average turnover: 1.20%.
+- Buy & Hold final net worth: $8,714.76.
+- Assessment: put/call features alone did not lift Sharpe when SH was removed. Both agents stayed defensive and beat Buy & Hold, but they still ended below initial capital. The likely cause is that 2022 hurt both SPY and TLT, while the model no longer had SH/inverse hedge exposure to monetize risk-off signals.
+- Decision: keep this as a negative/neutral options ablation. Next serious run should use options features as signals while restoring SH as a tradable hedge asset, without requiring SH options data.
+
+## Latest Options + SH Result
+
+- Command family: `python main.py --mode options_research --tickers SPY SH TLT --skip-sac --results-dir results/options_current`.
+- Universe: `SPY + SH + TLT`; options features still come from SPY/TLT/HYG/LQD/EMB, not SH options.
+- DQN final net worth: $9,176.00, Sharpe: -0.4294, Sortino: -0.6080, max drawdown: -14.39%, average turnover: 10.36%.
+- AC final net worth: $9,812.21, Sharpe: -0.1654, Sortino: -0.2189, max drawdown: -9.04%, average turnover: 4.17%.
+- Buy & Hold final net worth: $8,714.76.
+- Assessment: adding SH back improved Sharpe materially versus the SPY+TLT options branch, especially for AC. However, DQN over-allocated to SPY on average and suffered larger drawdown, so this is not yet competitive with the positive baseline or the 50/50 ensemble.
+- Decision: keep options+SH as a promising ablation. Next improvement should reduce noisy options dimensionality and add a risk-off allocation prior that uses SPY put/call/IV-skew stress to increase SH/TLT exposure only when stress is elevated.
+
+## Options Compact Risk-Off Revision
+
+- Change: replaced the full 42-column options feature block in `options_research` with compact stress features:
+  - `Options_RiskOffScore`
+  - `Options_RiskOff_High`
+  - SPY put/call Z-score, SPY ATM put/call Z-score, SPY IV-skew Z-score
+  - credit stress, bond stress, and TLT put/call Z-score
+- Added helper column `Options_RiskOff_Raw` for environment-side hedge logic; it is joined into the data frame but not standardized as a model input feature.
+- Added `options_hedge_weight` controls so the environment can gradually blend toward SH/TLT when options stress is high.
+- `options_research` defaults now use `options_feature_mode="compact"`, `dqn_options_hedge_weight=0.28`, and `ac_options_hedge_weight=0.24`.
+- Smoke check passed with `SPY + SH + TLT`: 62 state features, 8 compact options features, and no DQN/AC train/eval shape errors.
+
+## Latest Options Compact Result
+
+- DQN final net worth: $9,973.26, Sharpe: 0.0468, Sortino: 0.0694, max drawdown: -12.82%, average turnover: 10.56%.
+- AC final net worth: $9,991.00, Sharpe: 0.0234, Sortino: 0.0305, max drawdown: -10.40%, average turnover: 5.07%.
+- Assessment: compact risk-off features materially improved both agents from negative Sharpe to slightly positive Sharpe, but the drawdown is still too high. Trade logs show the worst test days happened when the policy still held 54%-70% SPY exposure.
+- Decision: make the options branch more defensive by lowering the DQN max allocation cap to 60%, adding a small DQN concentration penalty, and triggering options-driven SH/TLT hedge earlier when SPY trend is already negative.
+
+## Options Defensive Cap Revision
+
+- Changed `options_research` defaults:
+  - `dqn_max_total_allocation=0.60`
+  - `dqn_concentration_penalty_coef=0.0040`
+  - `dqn_options_hedge_weight=0.42`
+  - `ac_options_hedge_weight=0.32`
+  - `options_hedge_trigger=0.42`
+- Added trend-aware options trigger: if SPY is below its regime moving average and 20-day momentum is negative, the options hedge trigger can drop to 0.36.
+- Rationale: reduce large SPY losses on crash days without relying on future returns or test labels.
+
+## Latest Options Defensive Cap Result
+
+- DQN final net worth: $9,921.74, Sharpe: -0.0478, Sortino: -0.0713, max drawdown: -7.91%, average turnover: 13.68%.
+- AC final net worth: $8,809.75, Sharpe: -0.9060, Sortino: -1.3123, max drawdown: -14.83%, average turnover: 3.92%.
+- Assessment: the defensive cap reduced DQN drawdown but hurt return and raised turnover. AC failed badly because it drifted back to high SPY exposure, averaging about 49% SPY and suffering large losses on 2022 selloff days.
+- Decision: revert DQN toward the previous compact configuration and make AC conservative through lower total allocation/cash bias rather than stronger options hedge blending.
+
+## Options Balanced Recalibration
+
+- Changed `options_research` defaults:
+  - `dqn_max_total_allocation=0.70`
+  - `dqn_concentration_penalty_coef=0.0`
+  - `dqn_options_hedge_weight=0.28`
+  - `ac_max_total_allocation=0.45`
+  - `ac_cash_logit_bias=1.20`
+  - `ac_options_hedge_weight=0.24`
+  - `options_hedge_trigger=0.45`
+- Rationale: preserve the DQN compact result that was near break-even, while preventing AC from holding excessive SPY during the 2022 drawdown.
+
+## Latest Options Balanced Recalibration Result
+
+- DQN final net worth: $9,523.73, Sharpe: -0.3032, Sortino: -0.4118, max drawdown: -11.01%, average turnover: 12.34%.
+- AC final net worth: $8,887.24, Sharpe: -1.1974, Sortino: -1.7363, max drawdown: -13.23%, average turnover: 3.91%.
+- Assessment: this run was pathological. AC saturated at its maximum `TARGET 45%` action for most of the test, while DQN still selected `TARGET 70%` too often. The trend-aware hedge trigger made the policy harder to interpret and did not improve robustness.
+- Decision: remove the trend-aware trigger lowering, restore AC to the previous compact allocation settings, and use a fixed high options hedge threshold.
+
+## Options Stable Compact Revert
+
+- Changed `options_research` defaults:
+  - `ac_max_total_allocation=0.60`
+  - `ac_cash_logit_bias=0.90`
+  - `options_hedge_trigger=0.55`
+- Removed the dynamic lowering of options hedge trigger when SPY trend is negative.
+- Rationale: recover the prior compact behavior that produced slightly positive Sharpe for both agents and avoid action saturation.
+
+## Latest Options Stable Compact Result
+
+- DQN final net worth: $9,973.26, Sharpe: 0.0468, Sortino: 0.0694, max drawdown: -12.82%, average turnover: 10.56%.
+- AC final net worth: $9,991.00, Sharpe: 0.0234, Sortino: 0.0305, max drawdown: -10.40%, average turnover: 5.07%.
+- Assessment: the revert recovered the slightly positive Sharpe behavior. DQN remains too aggressive and AC is more defensive, making them complementary experts.
+- Decision: test an offline adaptive blend of the options DQN/AC logs instead of further mutating the environment.
+
+## Options Adaptive Ensemble Result
+
+- Source logs: `results/options_current/DQN_trade_log.csv` and `results/options_current/AC_trade_log.csv`.
+- Fixed 50/50 blend: final net worth $10,039.80, Sharpe 0.0758, Sortino 0.1106, max drawdown -9.27%, average turnover 6.60%.
+- Best fixed blend sweep: AC 60% / DQN 40%, final net worth $10,041.50, Sharpe 0.0765, max drawdown -9.18%.
+- Adaptive blend without smoothing: final net worth $10,095.62, Sharpe 0.1184, Sortino 0.1762, max drawdown -9.94%, average turnover 7.80%.
+- Adaptive blend with `max_weight_delta=0.05`: final net worth $10,201.52, Sharpe 0.1990, Sortino 0.2934, max drawdown -10.03%, average turnover 6.78%.
+- Friction sensitivity for smoothed adaptive blend:
+  - Cost 0.0010: final $10,201.52, Sharpe 0.1990.
+  - Cost 0.0015: final $10,078.96, Sharpe 0.1061.
+  - Cost 0.0020: final $9,958.02, Sharpe 0.0132.
+- Decision: keep `results/options_ensemble_current` as the smoothed adaptive options ensemble candidate. It does not beat the baseline 50/50 AC-DQN ensemble, but it is the strongest options-based ablation so far and remains near break-even under 0.2% cost.
+
+## Meta Ensemble With Options Overlay
+
+- Goal: test whether the best options ensemble can improve the strong baseline ensemble without retraining agents.
+- Method: blend `results/ensemble_current/ENSEMBLE_trade_log.csv` with `results/options_ensemble_current/ENSEMBLE_trade_log.csv`, then recompute PnL from blended weights and prices with transaction cost.
+- Fixed options overlay sweep:
+  - 0% options: final $10,737.38, Sharpe 0.6967, max drawdown -5.45%.
+  - 5% options: final $10,720.70, Sharpe 0.6872, max drawdown -5.38%.
+  - 20% options: final $10,668.49, Sharpe 0.6486, max drawdown -5.19%.
+  - Fixed overlay reduced drawdown slightly but reduced Sharpe.
+- Adaptive options overlay with `max_options_weight=0.15` and `max_weight_delta=0.05`:
+  - Final net worth: $10,732.19.
+  - Sharpe: 0.7045.
+  - Sortino: 1.0767.
+  - Max drawdown: -5.45%.
+  - Average turnover: 7.28%.
+  - Average options blend weight: 11.95%.
+- Friction sensitivity:
+  - Cost 0.0010: final $10,732.19, Sharpe 0.7045.
+  - Cost 0.0015: final $10,588.07, Sharpe 0.5766.
+  - Cost 0.0020: final $10,445.64, Sharpe 0.4486.
+- Decision: keep `results/meta_ensemble_current` as the new top candidate by Sharpe. The improvement over the baseline ensemble is small, so report it as an options overlay refinement rather than a large breakthrough.
+
+## Results Folder Cleanup
+
+- Standardized current result folders:
+  - `results/meta_ensemble_current`
+  - `results/ensemble_current`
+  - `results/options_current`
+  - `results/options_ensemble_current`
+  - `results/research_summary`
+- Kept friction folders that support market-friction claims:
+  - `results/meta_ensemble_friction_sweep`
+  - `results/options_ensemble_friction_sweep`
+  - `results/ensemble_friction_sweep`
+- Removed intermediate grid/smoke folders after recording their key metrics:
+  - `options_ensemble_adaptive`
+  - `options_ensemble_sweep`
+  - `options_ensemble_smooth`
+  - `meta_ensemble_sweep`
+  - `meta_ensemble_adaptive_sweep`
+  - `options_smoke`
+- Updated `results/README.md`, `results/latest_run.txt`, and `results/research_summary/metrics_summary.*`.

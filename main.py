@@ -18,6 +18,7 @@ def parse_args():
     parser.add_argument("--results-dir", default=None)
     parser.add_argument("--sentiment-csv", default=None)
     parser.add_argument("--options-csv", default=None)
+    parser.add_argument("--options-feature-mode", choices=["all", "compact"], default=None)
     parser.add_argument("--tickers", nargs="+", default=None)
     parser.add_argument("--no-macro", action="store_true")
     parser.add_argument("--macro", action="store_true")
@@ -54,6 +55,8 @@ def main():
         cfg.sentiment_path = args.sentiment_csv
     if args.options_csv is not None:
         cfg.options_path = args.options_csv
+    if args.options_feature_mode is not None:
+        cfg.options_feature_mode = args.options_feature_mode
     if args.tickers is not None:
         cfg.tickers = tuple(args.tickers)
     if args.no_macro:

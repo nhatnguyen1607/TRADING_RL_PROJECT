@@ -16,6 +16,9 @@ def parse_args():
     parser.add_argument("--adaptive-temperature", type=float, default=1.0)
     parser.add_argument("--min-ac-weight", type=float, default=0.25)
     parser.add_argument("--max-ac-weight", type=float, default=0.75)
+    parser.add_argument("--dqn-log", default=None)
+    parser.add_argument("--ac-log", default=None)
+    parser.add_argument("--max-weight-delta", type=float, default=None)
     return parser.parse_args()
 
 
@@ -30,6 +33,15 @@ def main():
         adaptive_temperature=args.adaptive_temperature,
         min_ac_weight=args.min_ac_weight,
         max_ac_weight=args.max_ac_weight,
+        max_weight_delta=args.max_weight_delta,
+        expert_paths={
+            key: value
+            for key, value in {
+                "DQN_BASE": args.dqn_log,
+                "AC_BASE": args.ac_log,
+            }.items()
+            if value is not None
+        },
     )
     print(f"Ensemble report written to {metrics['report_path']}")
     print(

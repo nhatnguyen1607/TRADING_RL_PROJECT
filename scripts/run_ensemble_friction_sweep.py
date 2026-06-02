@@ -14,6 +14,9 @@ def parse_args():
     parser.add_argument("--results-dir", default="results/ensemble_friction_sweep")
     parser.add_argument("--strategy", choices=["ac_dqn_blend", "adaptive_blend", "regime_gate"], default="adaptive_blend")
     parser.add_argument("--costs", nargs="+", type=float, default=[0.001, 0.0015, 0.002])
+    parser.add_argument("--dqn-log", default=None)
+    parser.add_argument("--ac-log", default=None)
+    parser.add_argument("--max-weight-delta", type=float, default=None)
     return parser.parse_args()
 
 
@@ -43,6 +46,15 @@ def main():
             results_dir=run_dir,
             strategy=args.strategy,
             transaction_cost=cost,
+            max_weight_delta=args.max_weight_delta,
+            expert_paths={
+                key: value
+                for key, value in {
+                    "DQN_BASE": args.dqn_log,
+                    "AC_BASE": args.ac_log,
+                }.items()
+                if value is not None
+            },
         )
         rows.append(
             {

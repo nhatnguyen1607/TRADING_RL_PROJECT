@@ -286,6 +286,8 @@ class MultiAssetTradingEnv(gym.Env):
         return_reward_weight=0.35,
         regime_hedge_weight=0.0,
         macro_hedge_weight=0.0,
+        options_hedge_weight=0.0,
+        options_hedge_trigger=0.45,
         regime_ma_window=80,
         portfolio_templates=None,
     ):
@@ -321,6 +323,8 @@ class MultiAssetTradingEnv(gym.Env):
         self.return_reward_weight = return_reward_weight
         self.regime_hedge_weight = regime_hedge_weight
         self.macro_hedge_weight = macro_hedge_weight
+        self.options_hedge_weight = options_hedge_weight
+        self.options_hedge_trigger = options_hedge_trigger
         self.regime_ma_window = regime_ma_window
         self.portfolio_templates = portfolio_templates
 
@@ -410,7 +414,11 @@ class MultiAssetTradingEnv(gym.Env):
         return weights.astype(np.float32)
 
     def _apply_regime_hedge(self, weights):
-        if (self.regime_hedge_weight <= 0.0 and self.macro_hedge_weight <= 0.0) or self.n_assets < 3:
+        if (
+            self.regime_hedge_weight <= 0.0
+            and self.macro_hedge_weight <= 0.0
+            and self.options_hedge_weight <= 0.0
+        ) or self.n_assets < 3:
             return weights
 
         hedge = np.zeros_like(weights)
@@ -433,6 +441,14 @@ class MultiAssetTradingEnv(gym.Env):
             macro_risk = float(self.df["Macro_Risk_Off_Raw"].iloc[self.current_step])
             if np.isfinite(macro_risk) and macro_risk >= 0.50:
                 blend = max(blend, self.macro_hedge_weight * macro_risk)
+
+        if self.options_hedge_weight > 0.0 and "Options_RiskOff_Raw" in self.df.columns:
+            signal_idx = max(0, self.current_step - 1)
+            options_risk = float(self.df["Options_RiskOff_Raw"].iloc[signal_idx])
+            trigger = self.options_hedge_trigger
+            if np.isfinite(options_risk) and options_risk >= trigger:
+                stress = np.clip((options_risk - trigger) / max(1.0 - trigger, 1e-8), 0.0, 1.0)
+                blend = max(blend, self.options_hedge_weight * stress)
 
         if blend <= 0.0:
             return weights

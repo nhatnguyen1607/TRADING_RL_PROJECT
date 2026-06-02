@@ -21,10 +21,13 @@ def make_multi_asset_env(df, cfg, is_discrete=True, ac_variant=False):
         "is_discrete": is_discrete,
         "reward_mode": cfg.reward_mode,
         "max_weight_delta": cfg.dqn_max_weight_delta,
+        "max_total_allocation": cfg.dqn_max_total_allocation,
         "turnover_penalty_coef": cfg.dqn_turnover_penalty_coef,
         "drawdown_penalty_coef": cfg.dqn_drawdown_penalty_coef,
         "concentration_penalty_coef": cfg.dqn_concentration_penalty_coef,
         "target_portfolio_vol": cfg.dqn_target_portfolio_vol,
+        "options_hedge_weight": cfg.dqn_options_hedge_weight,
+        "options_hedge_trigger": cfg.options_hedge_trigger,
     }
     if ac_variant:
         kwargs.update(
@@ -43,6 +46,8 @@ def make_multi_asset_env(df, cfg, is_discrete=True, ac_variant=False):
                 "target_portfolio_vol": cfg.ac_target_portfolio_vol,
                 "regime_hedge_weight": cfg.ac_regime_hedge_weight,
                 "macro_hedge_weight": cfg.ac_macro_hedge_weight,
+                "options_hedge_weight": cfg.ac_options_hedge_weight,
+                "options_hedge_trigger": cfg.options_hedge_trigger,
                 "regime_ma_window": cfg.ac_regime_ma_window,
             }
         )
@@ -60,6 +65,8 @@ def make_sac_env(df, cfg):
         drawdown_penalty_coef=cfg.sac_drawdown_penalty_coef,
         target_portfolio_vol=cfg.dqn_target_portfolio_vol,
         regime_hedge_weight=cfg.sac_regime_hedge_weight,
+        options_hedge_weight=cfg.sac_options_hedge_weight,
+        options_hedge_trigger=cfg.options_hedge_trigger,
         regime_ma_window=cfg.sac_regime_ma_window,
     )
 
@@ -88,6 +95,7 @@ def build_datasets(cfg):
         include_macro=cfg.include_macro,
         sentiment_path=cfg.sentiment_path,
         options_path=cfg.options_path,
+        options_feature_mode=cfg.options_feature_mode,
     )
     split_idx = int(len(df) * 0.8)
     train_df, test_df, _ = train_test_scale(df, split_idx)
@@ -120,7 +128,7 @@ def run_experiment(cfg):
         f"dqn_eps={cfg.dqn_episodes} | ac_eps={cfg.ac_episodes} | sac_eps={cfg.sac_episodes} | "
         f"hedge_graph_eps={cfg.hedge_graph_episodes} | "
         f"val_every={cfg.validation_interval} | macro={cfg.include_macro} | "
-        f"options={bool(cfg.options_path)}"
+        f"options={bool(cfg.options_path)}:{cfg.options_feature_mode}"
     )
 
     model_train_df, val_df, test_df = build_datasets(cfg)

@@ -18,6 +18,7 @@ class RunConfig:
     include_macro: bool = False
     sentiment_path: str = None
     options_path: str = None
+    options_feature_mode: str = "all"
     results_dir: str = "results"
     dqn_batch_size: int = 64
     dqn_train_every: int = 4
@@ -29,6 +30,7 @@ class RunConfig:
     ppo_minibatch_size: int = 128
     teacher_pretrain_epochs: int = 6
     dqn_max_weight_delta: float = 0.08
+    dqn_max_total_allocation: float = 0.70
     dqn_turnover_penalty_coef: float = 0.0050
     dqn_drawdown_penalty_coef: float = 0.0030
     dqn_target_portfolio_vol: float = None
@@ -49,6 +51,10 @@ class RunConfig:
     ac_online_teacher: bool = False
     ac_regime_hedge_weight: float = 0.35
     ac_macro_hedge_weight: float = 0.0
+    dqn_options_hedge_weight: float = 0.0
+    ac_options_hedge_weight: float = 0.0
+    sac_options_hedge_weight: float = 0.0
+    options_hedge_trigger: float = 0.45
     ac_regime_ma_window: int = 80
     run_dqn: bool = True
     run_ac: bool = True
@@ -150,8 +156,16 @@ def config_for_mode(mode):
             reward_mode="heuristic",
             include_macro=False,
             options_path="data/external/options_features_daily.csv",
+            options_feature_mode="compact",
             critic_target_mode="td",
             teacher_pretrain_epochs=6,
+            dqn_max_total_allocation=0.70,
+            dqn_concentration_penalty_coef=0.0,
+            dqn_options_hedge_weight=0.28,
+            ac_max_total_allocation=0.60,
+            ac_cash_logit_bias=0.90,
+            ac_options_hedge_weight=0.24,
+            options_hedge_trigger=0.55,
             results_dir="results/options_current",
         )
     if mode == "smoke":

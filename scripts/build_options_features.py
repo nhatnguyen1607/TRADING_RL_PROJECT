@@ -23,6 +23,10 @@ def _safe_ratio(numerator, denominator):
     return numerator / denominator.replace(0, np.nan)
 
 
+def _clip_unit(series, low=-1.5, high=2.5):
+    return ((series.clip(low, high) - low) / (high - low)).clip(0.0, 1.0)
+
+
 def _stationary_features(df, prefix):
     out = pd.DataFrame(index=df.index)
     put = df[f"{prefix}_PutVolume"]
@@ -173,6 +177,23 @@ def build_options_features(start_date="2015-01-01", end_date="2023-01-01", outpu
         features["Options_BondStress_Z20"] = features[
             ["Options_TLT_PutCallRatio_Z20", "Options_TLT_ShortInterestRatio_Z20"]
         ].mean(axis=1)
+
+    stress_cols = [
+        col
+        for col in [
+            "Options_SPY_PutCallRatio_Z20",
+            "Options_SPY_ATM_PutCallRatio_Z20",
+            "Options_SPY_IVSkew_Z20",
+            "Options_CreditStress_PutCall_Z20",
+            "Options_BondStress_Z20",
+        ]
+        if col in features.columns
+    ]
+    if stress_cols:
+        stress_z = features[stress_cols].mean(axis=1)
+        features["Options_RiskOffScore"] = stress_z
+        features["Options_RiskOff_Raw"] = _clip_unit(stress_z)
+        features["Options_RiskOff_High"] = (features["Options_RiskOff_Raw"] >= 0.65).astype(float)
 
     features = features.replace([np.inf, -np.inf], np.nan).ffill()
     features = features.reset_index().rename(columns={"index": "Date"})

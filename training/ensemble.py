@@ -186,11 +186,16 @@ def run_offline_ensemble(
     adaptive_temperature=1.0,
     min_ac_weight=0.25,
     max_ac_weight=0.75,
+    expert_paths=None,
+    max_weight_delta=None,
 ):
     if transaction_cost < 0.001:
         raise ValueError("Transaction cost must be at least 0.001 to preserve realistic market-friction assumptions.")
     os.makedirs(results_dir, exist_ok=True)
-    experts = {name: _load_expert(EXPERT_PATHS[name]) for name in _required_experts(strategy)}
+    paths = dict(EXPERT_PATHS)
+    if expert_paths:
+        paths.update(expert_paths)
+    experts = {name: _load_expert(paths[name]) for name in _required_experts(strategy)}
     panel = _prepare_panel(experts)
     expert_returns, expert_turnovers = _expert_return_panel(panel, experts, transaction_cost=transaction_cost)
 
@@ -220,6 +225,10 @@ def run_offline_ensemble(
             min_ac_weight=min_ac_weight,
             max_ac_weight=max_ac_weight,
         )
+        if max_weight_delta is not None:
+            max_delta = float(max_weight_delta)
+            target_weights = prev_weights + np.clip(target_weights - prev_weights, -max_delta, max_delta)
+            target_weights = np.clip(target_weights, 0.0, 1.0)
 
         if prev_prices is None or not np.all(np.isfinite(prev_prices)):
             gross_return = 0.0
@@ -279,6 +288,8 @@ def run_offline_ensemble(
             f.write(f"Adaptive Window: {adaptive_window}\n")
             f.write(f"Adaptive Temperature: {adaptive_temperature:.2f}\n")
             f.write(f"AC Weight Clamp: [{min_ac_weight:.2f}, {max_ac_weight:.2f}]\n")
+        if max_weight_delta is not None:
+            f.write(f"Max Weight Delta: {float(max_weight_delta):.3f}\n")
         f.write(f"Initial Capital: ${initial_balance:.2f}\n")
         f.write(f"Final Net Worth: ${final_net:.2f}\n")
         f.write(f"Annualized Sharpe Ratio: {sharpe:.4f}\n")
